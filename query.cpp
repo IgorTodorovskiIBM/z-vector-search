@@ -2,24 +2,46 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cstring>
 #include "llama.h"
 #include "common_store.h"
 
+void print_json(const std::string& query, const std::vector<Record>& store, const std::vector<std::pair<float, int>>& results, int top_k) {
+    std::cout << "{\n";
+    std::cout << "  \"query\": \"" << query << "\",\n";
+    std::cout << "  \"results\": [\n";
+    for (int i = 0; i < std::min((int)results.size(), top_k); ++i) {
+        auto & res = store[results[i].second];
+        std::cout << "    {\n";
+        std::cout << "      \"score\": " << results[i].first << ",\n";
+        std::cout << "      \"filename\": \"" << res.filename << "\",\n";
+        std::cout << "      \"snippet\": \"" << res.text << "\"\n";
+        std::cout << "    }" << (i == std::min((int)results.size(), top_k) - 1 ? "" : ",") << "\n";
+    }
+    std::cout << "  ]\n";
+    std::cout << "}\n";
+}
+
 int main(int argc, char ** argv) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <model_path> <store_file> <query>" << std::endl;
+    bool json_output = false;
+    int arg_idx = 1;
+
+    if (argc > 1 && strcmp(argv[1], "--json") == 0) {
+        json_output = true;
+        arg_idx++;
+    }
+
+    if (argc - arg_idx < 3) {
+        std::cerr << "Usage: " << argv[0] << " [--json] <model_path> <store_file> <query>" << std::endl;
         return 1;
     }
 
-    std::string model_path = argv[1];
-    std::string store_path = argv[2];
-    std::string query = argv[3];
+    std::string model_path = argv[arg_idx++];
+    std::string store_path = argv[arg_idx++];
+    std::string query = argv[arg_idx++];
 
     std::vector<Record> store = load_store(store_path);
-    if (store.empty()) {
-        std::cerr << "Error: Store is empty or could not be loaded." << std::endl;
-        return 1;
-    }
+    if (store.empty()) return 1;
 
     llama_backend_init();
     auto mparams = llama_model_default_params();
@@ -30,10 +52,7 @@ int main(int argc, char ** argv) {
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
     llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return 1;
-
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
-
+    
     auto q_tokens = std::vector<llama_token>(query.size() + 2);
     int n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), q_tokens.data(), q_tokens.size(), true, true);
     if (n_q_tokens < 0) {
@@ -45,7 +64,7 @@ int main(int argc, char ** argv) {
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
     llama_decode(ctx, q_batch);
     
-    float * q_emb = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
+    float * q_emb = (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
     std::vector<float> query_vec(q_emb, q_emb + llama_model_n_embd(model));
 
     std::vector<std::pair<float, int>> results;
@@ -54,11 +73,15 @@ int main(int argc, char ** argv) {
     }
     std::sort(results.rbegin(), results.rend());
 
-    std::cout << "\nResults for: \"" << query << "\"" << std::endl;
-    for (int i = 0; i < std::min((int)results.size(), 3); ++i) {
-        auto & res = store[results[i].second];
-        std::cout << "[" << i+1 << "] Similarity: " << results[i].first << " | File: " << res.filename << std::endl;
-        std::cout << "    Snippet: " << res.text << "\n" << std::endl;
+    if (json_output) {
+        print_json(query, store, results, 3);
+    } else {
+        std::cout << "\nResults for: \"" << query << "\"" << std::endl;
+        for (int i = 0; i < std::min((int)results.size(), 3); ++i) {
+            auto & res = store[results[i].second];
+            std::cout << "[" << i+1 << "] Similarity: " << results[i].first << " | File: " << res.filename << std::endl;
+            std::cout << "    Snippet: " << res.text << "\n" << std::endl;
+        }
     }
 
     llama_free(ctx);
