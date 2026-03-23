@@ -6,6 +6,12 @@
 #include "llama.h"
 #include "common_store.h"
 
+// Redirect all llama.cpp logs to stderr
+void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
+    (void)level; (void)user_data;
+    fputs(text, stderr);
+}
+
 void print_json(const std::string& query, const std::vector<Record>& store, const std::vector<std::pair<float, int>>& results, int top_k) {
     std::cout << "{\n";
     std::cout << "  \"query\": \"" << query << "\",\n";
@@ -35,6 +41,9 @@ int main(int argc, char ** argv) {
         std::cerr << "Usage: " << argv[0] << " [--json] <model_path> <store_file> <query>" << std::endl;
         return 1;
     }
+
+    // Set the log callback early
+    llama_log_set(llama_log_callback, NULL);
 
     std::string model_path = argv[arg_idx++];
     std::string store_path = argv[arg_idx++];
