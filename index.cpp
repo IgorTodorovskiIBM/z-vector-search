@@ -3,20 +3,38 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <cstring>
 #include "llama.h"
 #include "common_store.h"
 
 namespace fs = std::filesystem;
 
+static bool g_quiet = false;
+
+void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
+    (void)level; (void)user_data;
+    if (!g_quiet) {
+        fputs(text, stderr);
+    }
+}
+
 int main(int argc, char ** argv) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <model_path> <directory_path> <output_file>" << std::endl;
+    int arg_idx = 1;
+    if (argc > 1 && strcmp(argv[1], "--quiet") == 0) {
+        g_quiet = true;
+        arg_idx++;
+    }
+
+    if (argc - arg_idx < 3) {
+        std::cerr << "Usage: " << argv[0] << " [--quiet] <model_path> <directory_path> <output_file>" << std::endl;
         return 1;
     }
 
-    std::string model_path = argv[1];
-    std::string dir_path = argv[2];
-    std::string store_path = argv[3];
+    llama_log_set(llama_log_callback, NULL);
+
+    std::string model_path = argv[arg_idx++];
+    std::string dir_path = argv[arg_idx++];
+    std::string store_path = argv[arg_idx++];
 
     llama_backend_init();
     auto mparams = llama_model_default_params();
@@ -33,7 +51,7 @@ int main(int argc, char ** argv) {
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
     std::vector<Record> store;
 
-    std::cout << "Indexing: " << dir_path << std::endl;
+    if (!g_quiet) std::cout << "Indexing: " << dir_path << std::endl;
     for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
         if (entry.is_regular_file() && (entry.path().extension() == ".txt" || entry.path().extension() == ".md")) {
             std::ifstream file(entry.path());
@@ -59,12 +77,12 @@ int main(int argc, char ** argv) {
             rec.text = content.substr(0, 200) + "...";
             rec.embedding.assign(emb, emb + llama_model_n_embd(model));
             store.push_back(rec);
-            std::cout << "  - " << entry.path().filename() << std::endl;
+            if (!g_quiet) std::cout << "  - " << entry.path().filename() << std::endl;
         }
     }
 
     save_store(store_path, store);
-    std::cout << "Successfully saved " << store.size() << " records to " << store_path << std::endl;
+    if (!g_quiet) std::cout << "Successfully saved " << store.size() << " records to " << store_path << std::endl;
 
     llama_free(ctx);
     llama_model_free(model);

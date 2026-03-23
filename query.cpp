@@ -6,10 +6,14 @@
 #include "llama.h"
 #include "common_store.h"
 
-// Redirect all llama.cpp logs to stderr
+static bool g_quiet = false;
+
+// Redirect all llama.cpp logs to stderr, or silence if quiet
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
-    fputs(text, stderr);
+    if (!g_quiet) {
+        fputs(text, stderr);
+    }
 }
 
 // Simple JSON string sanitizer
@@ -21,7 +25,7 @@ std::string escape_json(const std::string& s) {
         else if (c == '\n') res += " ";
         else if (c == '\r') res += "";
         else if (c == '\t') res += " ";
-        else if ((unsigned char)c < 32) res += " "; // Replace other control chars
+        else if ((unsigned char)c < 32) res += " ";
         else res += c;
     }
     return res;
@@ -47,13 +51,19 @@ int main(int argc, char ** argv) {
     bool json_output = false;
     int arg_idx = 1;
 
-    if (argc > 1 && strcmp(argv[1], "--json") == 0) {
-        json_output = true;
+    while (arg_idx < argc && argv[arg_idx][0] == '-') {
+        if (strcmp(argv[arg_idx], "--json") == 0) {
+            json_output = true;
+        } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
+            g_quiet = true;
+        } else {
+            break;
+        }
         arg_idx++;
     }
 
     if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--json] <model_path> <store_file> <query>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--json] [--quiet] <model_path> <store_file> <query>" << std::endl;
         return 1;
     }
 
@@ -100,7 +110,7 @@ int main(int argc, char ** argv) {
     if (json_output) {
         print_json(query, store, results, 3);
     } else {
-        std::cout << "\nResults for: \"" << query << "\"" << std::endl;
+        if (!g_quiet) std::cout << "\nResults for: \"" << query << "\"" << std::endl;
         for (int i = 0; i < std::min((int)results.size(), 3); ++i) {
             auto & res = store[results[i].second];
             std::cout << "[" << i+1 << "] Similarity: " << results[i].first << " | File: " << res.filename << std::endl;
