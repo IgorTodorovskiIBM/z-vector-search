@@ -3,13 +3,24 @@ project(z-vector-search CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-if(NOT DEFINED ENV{ZOPEN_PKGINSTALL})
-    message(FATAL_ERROR "ZOPEN_PKGINSTALL environment variable not set")
+# Dependency Paths (Override with -DLLAMA_ROOT=... etc)
+if(DEFINED ENV{ZOPEN_PKGINSTALL})
+    set(DEFAULT_LLAMA "${ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
+    set(DEFAULT_ZOSLIB "${ZOPEN_PKGINSTALL}/zoslib/zoslib")
+    set(DEFAULT_BLIS "${ZOPEN_PKGINSTALL}/blis/blis-2.0")
+else()
+    set(DEFAULT_LLAMA "/usr/local/llamacpp")
+    set(DEFAULT_ZOSLIB "/usr/local/zoslib")
+    set(DEFAULT_BLIS "/usr/local/blis")
 endif()
 
-set(LLAMA_ROOT "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
-set(ZOSLIB_ROOT "$ENV{ZOPEN_PKGINSTALL}/zoslib/zoslib")
-set(BLIS_ROOT "$ENV{ZOPEN_PKGINSTALL}/blis/blis-2.0")
+set(LLAMA_ROOT "${DEFAULT_LLAMA}" CACHE PATH "Path to llamacpp installation")
+set(ZOSLIB_ROOT "${DEFAULT_ZOSLIB}" CACHE PATH "Path to zoslib installation")
+set(BLIS_ROOT "${DEFAULT_BLIS}" CACHE PATH "Path to blis installation")
+
+message(STATUS "Using LLAMA_ROOT: ${LLAMA_ROOT}")
+message(STATUS "Using ZOSLIB_ROOT: ${ZOSLIB_ROOT}")
+message(STATUS "Using BLIS_ROOT: ${BLIS_ROOT}")
 
 # z/OS specific flags
 set(ZOS_FLAGS "-fzos-le-char-mode=ascii -mnocsect -fno-short-enums -m64 -mzos-target=zosv2r5 -march=z13")
@@ -38,6 +49,6 @@ target_link_libraries(z-index ${LLAMA_LIBS})
 add_executable(z-query query.cpp)
 target_link_libraries(z-query ${LLAMA_LIBS})
 
-# Keeping the old one too for compatibility
 add_executable(z-vector-search main.cpp)
 target_link_libraries(z-vector-search ${LLAMA_LIBS})
+install(TARGETS z-index z-query z-vector-search DESTINATION bin)
