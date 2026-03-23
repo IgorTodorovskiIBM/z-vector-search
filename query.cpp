@@ -12,16 +12,31 @@ void llama_log_callback(enum ggml_log_level level, const char * text, void * use
     fputs(text, stderr);
 }
 
+// Simple JSON string sanitizer
+std::string escape_json(const std::string& s) {
+    std::string res;
+    for (char c : s) {
+        if (c == '"') res += "\\\"";
+        else if (c == '\\') res += "\\\\";
+        else if (c == '\n') res += " ";
+        else if (c == '\r') res += "";
+        else if (c == '\t') res += " ";
+        else if ((unsigned char)c < 32) res += " "; // Replace other control chars
+        else res += c;
+    }
+    return res;
+}
+
 void print_json(const std::string& query, const std::vector<Record>& store, const std::vector<std::pair<float, int>>& results, int top_k) {
     std::cout << "{\n";
-    std::cout << "  \"query\": \"" << query << "\",\n";
+    std::cout << "  \"query\": \"" << escape_json(query) << "\",\n";
     std::cout << "  \"results\": [\n";
     for (int i = 0; i < std::min((int)results.size(), top_k); ++i) {
         auto & res = store[results[i].second];
         std::cout << "    {\n";
         std::cout << "      \"score\": " << results[i].first << ",\n";
-        std::cout << "      \"filename\": \"" << res.filename << "\",\n";
-        std::cout << "      \"snippet\": \"" << res.text << "\"\n";
+        std::cout << "      \"filename\": \"" << escape_json(res.filename) << "\",\n";
+        std::cout << "      \"snippet\": \"" << escape_json(res.text) << "\"\n";
         std::cout << "    }" << (i == std::min((int)results.size(), top_k) - 1 ? "" : ",") << "\n";
     }
     std::cout << "  ]\n";
