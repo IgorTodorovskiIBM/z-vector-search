@@ -30,17 +30,35 @@ set(ZOS_COMP_FLAGS "-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
 
+# Flexible Header Search
 include_directories(${LLAMA_ROOT}/include)
+include_directories(${LLAMA_ROOT})
+include_directories(${ZOSLIB_ROOT}/include)
+include_directories(${BLIS_ROOT}/include)
 
-set(LLAMA_LIBS
-    ${LLAMA_ROOT}/lib/libllama.a
-    ${LLAMA_ROOT}/lib/libggml.a
-    ${LLAMA_ROOT}/lib/libggml-base.a
-    ${LLAMA_ROOT}/lib/libggml-cpu.a
-    ${LLAMA_ROOT}/lib/libggml-blas.a
-    ${LLAMA_ROOT}/lib/libmtmd.a
-    ${BLIS_ROOT}/lib/libblis.a
-    ${ZOSLIB_ROOT}/lib/libzoslib.a
+# Helper function to find a library in multiple possible locations
+function(find_zopen_lib VAR NAME ROOT)
+    find_library(${VAR} NAMES ${NAME} PATHS "${ROOT}/lib" "${ROOT}" NO_DEFAULT_PATH)
+endfunction()
+
+find_zopen_lib(LIB_LLAMA llama ${LLAMA_ROOT})
+find_zopen_lib(LIB_GGML ggml ${LLAMA_ROOT})
+find_zopen_lib(LIB_GGML_BASE ggml-base ${LLAMA_ROOT})
+find_zopen_lib(LIB_GGML_CPU ggml-cpu ${LLAMA_ROOT})
+find_zopen_lib(LIB_GGML_BLAS ggml-blas ${LLAMA_ROOT})
+find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
+find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
+find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
+
+set(LLAMA_LIBS 
+    ${LIB_LLAMA} 
+    ${LIB_GGML} 
+    ${LIB_GGML_BASE} 
+    ${LIB_GGML_CPU} 
+    ${LIB_GGML_BLAS} 
+    ${LIB_MTMD} 
+    ${LIB_BLIS} 
+    ${LIB_ZOSLIB}
 )
 
 add_executable(z-index index.cpp)
@@ -51,4 +69,5 @@ target_link_libraries(z-query ${LLAMA_LIBS})
 
 add_executable(z-vector-search main.cpp)
 target_link_libraries(z-vector-search ${LLAMA_LIBS})
+
 install(TARGETS z-index z-query z-vector-search DESTINATION bin)
