@@ -85,8 +85,12 @@ int main(int argc, char ** argv) {
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
+    cparams.n_ctx = 2048;
+    cparams.n_batch = 2048;
+    cparams.n_ubatch = 2048;
     llama_context * ctx = llama_init_from_model(model, cparams);
-    
+    if (!ctx) return 1;
+
     auto q_tokens = std::vector<llama_token>(query.size() + 2);
     int n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), q_tokens.data(), q_tokens.size(), true, true);
     if (n_q_tokens < 0) {
@@ -96,9 +100,11 @@ int main(int argc, char ** argv) {
     q_tokens.resize(n_q_tokens);
 
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
-    llama_decode(ctx, q_batch);
+    if (llama_decode(ctx, q_batch) != 0) return 1;
     
     float * q_emb = (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
+    if (!q_emb) return 1;
+    
     std::vector<float> query_vec(q_emb, q_emb + llama_model_n_embd(model));
 
     std::vector<std::pair<float, int>> results;

@@ -45,6 +45,9 @@ int main(int argc, char ** argv) {
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
     cparams.n_ctx = 2048;
+    cparams.n_batch = 2048;  // Ensure n_batch >= n_ctx
+    cparams.n_ubatch = 2048; // Encoder requires n_ubatch >= n_tokens
+    
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) return 1;
 
@@ -66,10 +69,12 @@ int main(int argc, char ** argv) {
             }
             tokens.resize(n_tokens);
 
-            llama_batch batch = llama_batch_get_one(tokens.data(), std::min((int)tokens.size(), (int)cparams.n_ctx));
+            // Limit to context size
+            int n_to_decode = std::min((int)tokens.size(), (int)cparams.n_ctx);
+            llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
             if (llama_decode(ctx, batch) != 0) continue;
 
-            float * emb = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
+            float * emb = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, n_to_decode - 1) : llama_get_embeddings_seq(ctx, 0);
             if (!emb) continue;
 
             Record rec;
