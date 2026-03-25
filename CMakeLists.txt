@@ -36,9 +36,15 @@ include_directories(${LLAMA_ROOT})
 include_directories(${ZOSLIB_ROOT}/include)
 include_directories(${BLIS_ROOT}/include)
 
-# Helper function to find a library in multiple possible locations
+# Helper function to find a library by exact filename
 function(find_zopen_lib VAR NAME ROOT)
-    find_library(${VAR} NAMES ${NAME} PATHS "${ROOT}/lib" "${ROOT}" NO_DEFAULT_PATH)
+    set(SEARCH_PATHS "${ROOT}/lib" "${ROOT}")
+    find_file(${VAR}_FILE NAMES "lib${NAME}.a" PATHS ${SEARCH_PATHS} NO_DEFAULT_PATH)
+    if(${VAR}_FILE)
+        set(${VAR} "${${VAR}_FILE}" PARENT_SCOPE)
+    else()
+        set(${VAR} "${VAR}-NOTFOUND" PARENT_SCOPE)
+    endif()
 endfunction()
 
 find_zopen_lib(LIB_LLAMA llama ${LLAMA_ROOT})
@@ -50,16 +56,15 @@ find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
 find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
 find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
 
-set(LLAMA_LIBS 
-    ${LIB_LLAMA} 
-    ${LIB_GGML} 
-    ${LIB_GGML_BASE} 
-    ${LIB_GGML_CPU} 
-    ${LIB_GGML_BLAS} 
-    ${LIB_MTMD} 
-    ${LIB_BLIS} 
-    ${LIB_ZOSLIB}
-)
+# Check each one and warn if missing (some older versions might not have all ggml-* libs)
+set(LLAMA_LIBS "")
+foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS LIB_MTMD LIB_BLIS LIB_ZOSLIB)
+    if(${L})
+        list(APPEND LLAMA_LIBS ${${L}})
+    else()
+        message(WARNING "Optional or missing dependency: ${L}")
+    endif()
+endforeach()
 
 add_executable(z-index index.cpp)
 target_link_libraries(z-index ${LLAMA_LIBS})
