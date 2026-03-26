@@ -177,8 +177,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        int rc = is_encoder ? llama_encode(ctx, batch) : llama_decode(ctx, batch);
-        if (rc != 0) {
+        if (embed_batch(ctx, batch, is_encoder) != 0) {
             if (!g_quiet) std::cerr << "  Batch encode failed, skipping " << batch_indices.size() << " files" << std::endl;
             llama_batch_free(batch);
             continue;

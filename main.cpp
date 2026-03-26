@@ -177,8 +177,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        int rc = is_encoder ? llama_encode(ctx, batch) : llama_decode(ctx, batch);
-        if (rc != 0) {
+        if (embed_batch(ctx, batch, is_encoder) != 0) {
             std::cerr << "  Batch encode failed, skipping " << batch_indices.size() << " files" << std::endl;
             llama_batch_free(batch);
             continue;
@@ -230,9 +229,8 @@ int main(int argc, char ** argv) {
     query_tokens.resize(n_q_tokens);
 
     llama_memory_clear(llama_get_memory(ctx), false);
-    llama_batch q_batch = llama_batch_get_one(query_tokens.data(), query_tokens.size());
-    int q_rc = is_encoder ? llama_encode(ctx, q_batch) : llama_decode(ctx, q_batch);
-    if (q_rc != 0) {
+    llama_batch q_batch = build_single_seq_batch(query_tokens.data(), query_tokens.size(), is_encoder);
+    if (embed_batch(ctx, q_batch, is_encoder) != 0) {
         std::cerr << "Error: failed to encode query" << std::endl;
         return 1;
     }
@@ -250,6 +248,7 @@ int main(int argc, char ** argv) {
     }
 
     std::vector<float> query_vec(q_emb_ptr, q_emb_ptr + n_embd);
+    if (is_encoder) llama_batch_free(q_batch);
     normalize_embedding(query_vec);
 
     // 5. Rank by similarity

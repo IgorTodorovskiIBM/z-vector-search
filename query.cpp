@@ -112,9 +112,9 @@ int main(int argc, char ** argv) {
     q_tokens.resize(n_q_tokens);
 
     llama_memory_clear(llama_get_memory(ctx), false);
-    llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
-    int rc = is_encoder ? llama_encode(ctx, q_batch) : llama_decode(ctx, q_batch);
-    if (rc != 0) return 1;
+    llama_batch q_batch = build_single_seq_batch(q_tokens.data(), q_tokens.size(), is_encoder);
+    if (embed_batch(ctx, q_batch, is_encoder) != 0) return 1;
+    if (is_encoder) llama_batch_free(q_batch);
 
     float * q_emb = (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
     if (!q_emb) return 1;

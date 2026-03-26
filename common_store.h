@@ -10,6 +10,8 @@
 #include <sstream>
 #include <algorithm>
 
+#include "llama.h"
+
 struct Record {
     std::string filename;
     std::string text;
@@ -91,6 +93,28 @@ inline void normalize_embedding(std::vector<float>& vec) {
     if (norm > 0.0f) {
         for (float &v : vec) v /= norm;
     }
+}
+
+// Build a single-sequence batch with logits marked for encoder models
+inline llama_batch build_single_seq_batch(const llama_token * tokens, int n_tokens, bool is_encoder) {
+    if (!is_encoder) {
+        return llama_batch_get_one(const_cast<llama_token *>(tokens), n_tokens);
+    }
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    for (int i = 0; i < n_tokens; ++i) {
+        batch.token[batch.n_tokens]     = tokens[i];
+        batch.pos[batch.n_tokens]       = i;
+        batch.n_seq_id[batch.n_tokens]  = 1;
+        batch.seq_id[batch.n_tokens][0] = 0;
+        batch.logits[batch.n_tokens]    = true;
+        batch.n_tokens++;
+    }
+    return batch;
+}
+
+// Encode or decode based on model type
+inline int embed_batch(llama_context * ctx, llama_batch & batch, bool is_encoder) {
+    return is_encoder ? llama_encode(ctx, batch) : llama_decode(ctx, batch);
 }
 
 // Dot product for pre-normalized vectors (faster than cosine_similarity)
