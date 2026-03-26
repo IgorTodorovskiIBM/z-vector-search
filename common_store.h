@@ -93,16 +93,14 @@ inline void normalize_embedding(std::vector<float>& vec) {
     }
 }
 
-inline float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
+// Dot product for pre-normalized vectors (faster than cosine_similarity)
+inline float dot_product(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.size() != b.size() || a.empty()) return 0.0f;
-    double dot = 0.0, norm_a = 0.0, norm_b = 0.0;
+    double dot = 0.0;
     for (size_t i = 0; i < a.size(); ++i) {
         dot += (double)a[i] * (double)b[i];
-        norm_a += (double)a[i] * (double)a[i];
-        norm_b += (double)b[i] * (double)b[i];
     }
-    if (norm_a == 0.0 || norm_b == 0.0) return 0.0f;
-    return (float)(dot / (std::sqrt(norm_a) * std::sqrt(norm_b)));
+    return (float)dot;
 }
 
 #endif

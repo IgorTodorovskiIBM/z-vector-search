@@ -109,7 +109,7 @@ int main(int argc, char ** argv) {
     }
     q_tokens.resize(n_q_tokens);
 
-    llama_memory_clear(llama_get_memory(ctx), true);
+    llama_memory_clear(llama_get_memory(ctx), false);
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) return 1;
 
@@ -120,10 +120,13 @@ int main(int argc, char ** argv) {
     normalize_embedding(query_vec);
 
     std::vector<std::pair<float, int>> results;
+    results.reserve(store.size());
     for (int i = 0; i < (int)store.size(); ++i) {
-        results.push_back({cosine_similarity(query_vec, store[i].embedding), i});
+        results.push_back({dot_product(query_vec, store[i].embedding), i});
     }
-    std::sort(results.rbegin(), results.rend());
+    int n_results = std::min((int)results.size(), top_k);
+    std::partial_sort(results.begin(), results.begin() + n_results, results.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
 
     if (json_output) {
         print_json(query, store, results, top_k);

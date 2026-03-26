@@ -12,6 +12,13 @@
 
 namespace fs = std::filesystem;
 
+struct TokenizedDoc {
+    std::string filename;
+    std::string snippet;
+    std::vector<llama_token> tokens;
+    int n_truncated;
+};
+
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
@@ -44,7 +51,7 @@ int main(int argc, char ** argv) {
 
     // 1. Initialize llama.cpp
     llama_backend_init();
-    
+
     auto mparams = llama_model_default_params();
     llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
     if (!model) {
@@ -55,8 +62,8 @@ int main(int argc, char ** argv) {
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
 
     auto cparams = llama_context_default_params();
-    cparams.embeddings = true; // MUST be true
-    cparams.n_ctx = 2048;      // Match model context length
+    cparams.embeddings = true;
+    cparams.n_ctx = 2048;
     cparams.n_batch = 2048;
     cparams.n_ubatch = 2048;
     llama_context * ctx = llama_init_from_model(model, cparams);
@@ -66,72 +73,141 @@ int main(int argc, char ** argv) {
     }
 
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+    const int n_ctx = (int)cparams.n_ctx;
+    const int n_embd = llama_model_n_embd(model);
+
     std::cout << "Model pooling type: " << pooling_type << " (1=MEAN)" << std::endl;
 
-    std::vector<Record> database;
-
-    // 2. Scan directory and embed files
+    // 2. Scan directory and tokenize all files
     std::cout << "Indexing directory: " << dir_path << " (suffixes: ";
     for (size_t i = 0; i < suffixes.size(); ++i) std::cout << suffixes[i] << (i == suffixes.size() - 1 ? "" : ", ");
     std::cout << ")..." << std::endl;
+
+    std::vector<TokenizedDoc> docs;
     for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
-        if (entry.is_regular_file() && has_suffix(entry.path().string(), suffixes)) {
-            std::cout << "  - Processing: " << entry.path().filename() << "..." << std::flush;
+        if (!entry.is_regular_file() || !has_suffix(entry.path().string(), suffixes)) continue;
 
-            std::ifstream file(entry.path());
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            if (content.empty()) {
-                std::cout << " Skipped (empty)" << std::endl;
-                continue;
+        std::ifstream file(entry.path());
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (content.empty()) {
+            std::cout << "  - Skipped (empty): " << entry.path().filename() << std::endl;
+            continue;
+        }
+
+        std::string input = use_prefix ? "search_document: " + content : content;
+
+        auto tokens = std::vector<llama_token>(input.size() + 2);
+        int n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
+        if (n_tokens < 0) {
+            tokens.resize(-n_tokens);
+            n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
+        }
+
+        TokenizedDoc doc;
+        doc.filename = entry.path().string();
+        doc.snippet = content.substr(0, 200) + "...";
+        doc.n_truncated = (n_tokens > n_ctx) ? n_tokens : 0;
+        int n_keep = std::min(n_tokens, n_ctx);
+        doc.tokens.assign(tokens.begin(), tokens.begin() + n_keep);
+        docs.push_back(std::move(doc));
+    }
+
+    if (docs.empty()) {
+        std::cerr << "Error: No files found to index." << std::endl;
+        return 1;
+    }
+
+    std::cout << "Tokenized " << docs.size() << " files. Encoding..." << std::endl;
+
+    // 3. Batch decode documents
+    std::vector<Record> database;
+    database.reserve(docs.size());
+
+    size_t doc_idx = 0;
+    while (doc_idx < docs.size()) {
+        std::vector<size_t> batch_indices;
+        int total_tokens = 0;
+
+        while (doc_idx < docs.size()) {
+            int doc_tokens = (int)docs[doc_idx].tokens.size();
+            if (batch_indices.empty() && doc_tokens >= n_ctx) {
+                batch_indices.push_back(doc_idx++);
+                total_tokens = doc_tokens;
+                break;
             }
+            if (total_tokens + doc_tokens > n_ctx) break;
+            batch_indices.push_back(doc_idx++);
+            total_tokens += doc_tokens;
+        }
 
-            // Tokenize
-            std::string input = use_prefix ? "search_document: " + content : content;
+        if (batch_indices.empty()) break;
 
-            auto tokens = std::vector<llama_token>(input.size() + 2);
-            int n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
-            if (n_tokens < 0) {
-                tokens.resize(-n_tokens);
-                n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
+        for (size_t bi = 0; bi < batch_indices.size(); ++bi) {
+            auto & doc = docs[batch_indices[bi]];
+            if (doc.n_truncated > 0) {
+                std::cerr << "  Warning: " << doc.filename << " truncated from "
+                          << doc.n_truncated << " to " << (int)doc.tokens.size() << " tokens" << std::endl;
             }
-            tokens.resize(n_tokens);
+        }
 
-            // Decode
-            int n_to_decode = std::min((int)tokens.size(), (int)cparams.n_ctx);
-            if (n_to_decode < n_tokens) {
-                std::cerr << "\n    Warning: truncated from " << n_tokens << " to " << n_to_decode << " tokens" << std::endl;
+        llama_memory_clear(llama_get_memory(ctx), false);
+        llama_batch batch = llama_batch_init(total_tokens, 0, 1);
+
+        std::vector<int> last_token_pos(batch_indices.size(), -1);
+
+        for (size_t bi = 0; bi < batch_indices.size(); ++bi) {
+            auto & doc = docs[batch_indices[bi]];
+            llama_seq_id seq_id = (llama_seq_id)bi;
+
+            for (int t = 0; t < (int)doc.tokens.size(); ++t) {
+                batch.token[batch.n_tokens]      = doc.tokens[t];
+                batch.pos[batch.n_tokens]        = t;
+                batch.n_seq_id[batch.n_tokens]   = 1;
+                batch.seq_id[batch.n_tokens][0]  = seq_id;
+                batch.logits[batch.n_tokens]     = false;
+                last_token_pos[bi] = batch.n_tokens;
+                batch.n_tokens++;
             }
+        }
 
-            llama_memory_clear(llama_get_memory(ctx), true);
-            llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
-            if (llama_decode(ctx, batch) != 0) {
-                std::cerr << " Failed (decode error)" << std::endl;
-                continue;
+        if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
+            for (int pos : last_token_pos) {
+                if (pos >= 0) batch.logits[pos] = true;
             }
+        }
 
-            // Get Embedding
+        if (llama_decode(ctx, batch) != 0) {
+            std::cerr << "  Batch decode failed, skipping " << batch_indices.size() << " files" << std::endl;
+            llama_batch_free(batch);
+            continue;
+        }
+
+        for (size_t bi = 0; bi < batch_indices.size(); ++bi) {
+            auto & doc = docs[batch_indices[bi]];
             float * emb = nullptr;
+
             if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-                emb = llama_get_embeddings_ith(ctx, n_to_decode - 1); // last token
+                emb = llama_get_embeddings_ith(ctx, last_token_pos[bi]);
             } else {
-                emb = llama_get_embeddings_seq(ctx, 0); // sequence 0
+                emb = llama_get_embeddings_seq(ctx, (llama_seq_id)bi);
             }
 
             if (!emb) {
-                std::cerr << " Failed (no embedding)" << std::endl;
+                std::cerr << "  Failed (no embedding): " << doc.filename << std::endl;
                 continue;
             }
 
-            int n_embd = llama_model_n_embd(model);
             Record rec;
-            rec.filename = entry.path().string();
-            rec.text = content.substr(0, 200) + "...";
+            rec.filename = std::move(doc.filename);
+            rec.text = std::move(doc.snippet);
             rec.embedding.assign(emb, emb + n_embd);
             normalize_embedding(rec.embedding);
-            database.push_back(rec);
-            
-            std::cout << " Done (" << tokens.size() << " tokens)" << std::endl;
+            database.push_back(std::move(rec));
         }
+
+        llama_batch_free(batch);
+        std::cout << "  Batch done: " << batch_indices.size() << " files, "
+                  << total_tokens << " tokens" << std::endl;
     }
 
     if (database.empty()) {
@@ -139,7 +215,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // 3. Embed the Query
+    // 4. Embed the Query
     std::cout << "\nSearching for: \"" << query << "\"" << std::endl;
     std::string q_input = use_prefix ? "search_query: " + query : query;
 
@@ -151,7 +227,7 @@ int main(int argc, char ** argv) {
     }
     query_tokens.resize(n_q_tokens);
 
-    llama_memory_clear(llama_get_memory(ctx), true);
+    llama_memory_clear(llama_get_memory(ctx), false);
     llama_batch q_batch = llama_batch_get_one(query_tokens.data(), query_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) {
         std::cerr << "Error: failed to decode query" << std::endl;
@@ -170,20 +246,22 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    std::vector<float> query_vec(q_emb_ptr, q_emb_ptr + llama_model_n_embd(model));
+    std::vector<float> query_vec(q_emb_ptr, q_emb_ptr + n_embd);
     normalize_embedding(query_vec);
 
-    // 4. Rank by similarity
+    // 5. Rank by similarity
     std::vector<std::pair<float, int>> results;
+    results.reserve(database.size());
     for (int i = 0; i < (int)database.size(); ++i) {
-        float sim = cosine_similarity(query_vec, database[i].embedding);
-        results.push_back({sim, i});
+        results.push_back({dot_product(query_vec, database[i].embedding), i});
     }
-    std::sort(results.rbegin(), results.rend());
+    int n_results = std::min((int)results.size(), top_k);
+    std::partial_sort(results.begin(), results.begin() + n_results, results.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    // 5. Print Results
+    // 6. Print Results
     std::cout << "\nTop Results:" << std::endl;
-    for (int i = 0; i < std::min((int)results.size(), top_k); ++i) {
+    for (int i = 0; i < n_results; ++i) {
         auto & res = database[results[i].second];
         std::cout << "[" << i+1 << "] Score: " << results[i].first << " | File: " << res.filename << std::endl;
         std::cout << "    Snippet: " << res.text << "\n" << std::endl;
