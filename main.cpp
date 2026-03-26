@@ -5,6 +5,8 @@
 #include <fstream>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include "llama.h"
 #include "common_store.h"
 
@@ -13,10 +15,18 @@ namespace fs = std::filesystem;
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
+    bool use_prefix = false;
+    int top_k = 3;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
             suffixes = parse_suffixes(argv[arg_idx + 1]);
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
+            use_prefix = true;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
+            top_k = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
         } else {
             break;
@@ -24,7 +34,7 @@ int main(int argc, char ** argv) {
     }
 
     if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--include .txt,.md,.cpp] <model_path> <directory_path> <query>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--include .txt,.md,.cpp] [--prefix] [--top-k N] <model_path> <directory_path> <query>" << std::endl;
         return 1;
     }
 
@@ -76,16 +86,24 @@ int main(int argc, char ** argv) {
             }
 
             // Tokenize
-            auto tokens = std::vector<llama_token>(content.size() + 2);
-            int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), tokens.data(), tokens.size(), true, true);
+            std::string input = use_prefix ? "search_document: " + content : content;
+
+            auto tokens = std::vector<llama_token>(input.size() + 2);
+            int n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
             if (n_tokens < 0) {
                 tokens.resize(-n_tokens);
-                n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), tokens.data(), tokens.size(), true, true);
+                n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
             }
             tokens.resize(n_tokens);
 
             // Decode
-            llama_batch batch = llama_batch_get_one(tokens.data(), std::min((int)tokens.size(), (int)cparams.n_ctx));
+            int n_to_decode = std::min((int)tokens.size(), (int)cparams.n_ctx);
+            if (n_to_decode < n_tokens) {
+                std::cerr << "\n    Warning: truncated from " << n_tokens << " to " << n_to_decode << " tokens" << std::endl;
+            }
+
+            llama_kv_self_clear(ctx);
+            llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
             if (llama_decode(ctx, batch) != 0) {
                 std::cerr << " Failed (decode error)" << std::endl;
                 continue;
@@ -94,7 +112,7 @@ int main(int argc, char ** argv) {
             // Get Embedding
             float * emb = nullptr;
             if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-                emb = llama_get_embeddings_ith(ctx, std::min((int)tokens.size(), (int)cparams.n_ctx) - 1); // last token
+                emb = llama_get_embeddings_ith(ctx, n_to_decode - 1); // last token
             } else {
                 emb = llama_get_embeddings_seq(ctx, 0); // sequence 0
             }
@@ -109,6 +127,7 @@ int main(int argc, char ** argv) {
             rec.filename = entry.path().string();
             rec.text = content.substr(0, 200) + "...";
             rec.embedding.assign(emb, emb + n_embd);
+            normalize_embedding(rec.embedding);
             database.push_back(rec);
             
             std::cout << " Done (" << tokens.size() << " tokens)" << std::endl;
@@ -122,14 +141,17 @@ int main(int argc, char ** argv) {
 
     // 3. Embed the Query
     std::cout << "\nSearching for: \"" << query << "\"" << std::endl;
-    auto query_tokens = std::vector<llama_token>(query.size() + 2);
-    int n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), query_tokens.data(), query_tokens.size(), true, true);
+    std::string q_input = use_prefix ? "search_query: " + query : query;
+
+    auto query_tokens = std::vector<llama_token>(q_input.size() + 2);
+    int n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(), query_tokens.data(), query_tokens.size(), true, true);
     if (n_q_tokens < 0) {
         query_tokens.resize(-n_q_tokens);
-        n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), query_tokens.data(), query_tokens.size(), true, true);
+        n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(), query_tokens.data(), query_tokens.size(), true, true);
     }
     query_tokens.resize(n_q_tokens);
 
+    llama_kv_self_clear(ctx);
     llama_batch q_batch = llama_batch_get_one(query_tokens.data(), query_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) {
         std::cerr << "Error: failed to decode query" << std::endl;
@@ -149,6 +171,7 @@ int main(int argc, char ** argv) {
     }
 
     std::vector<float> query_vec(q_emb_ptr, q_emb_ptr + llama_model_n_embd(model));
+    normalize_embedding(query_vec);
 
     // 4. Rank by similarity
     std::vector<std::pair<float, int>> results;
@@ -160,7 +183,7 @@ int main(int argc, char ** argv) {
 
     // 5. Print Results
     std::cout << "\nTop Results:" << std::endl;
-    for (int i = 0; i < std::min((int)results.size(), 3); ++i) {
+    for (int i = 0; i < std::min((int)results.size(), top_k); ++i) {
         auto & res = database[results[i].second];
         std::cout << "[" << i+1 << "] Score: " << results[i].first << " | File: " << res.filename << std::endl;
         std::cout << "    Snippet: " << res.text << "\n" << std::endl;

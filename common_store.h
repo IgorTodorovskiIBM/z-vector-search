@@ -84,6 +84,15 @@ inline std::vector<Record> load_store(const std::string& path) {
     return store;
 }
 
+inline void normalize_embedding(std::vector<float>& vec) {
+    float norm = 0.0f;
+    for (float v : vec) norm += v * v;
+    norm = std::sqrt(norm);
+    if (norm > 0.0f) {
+        for (float &v : vec) v /= norm;
+    }
+}
+
 inline float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.size() != b.size() || a.empty()) return 0.0f;
     double dot = 0.0, norm_a = 0.0, norm_b = 0.0;

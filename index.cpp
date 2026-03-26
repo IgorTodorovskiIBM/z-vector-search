@@ -22,6 +22,8 @@ int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
 
+    bool use_prefix = false;
+
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
@@ -29,13 +31,16 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
             suffixes = parse_suffixes(argv[arg_idx + 1]);
             arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
+            use_prefix = true;
+            arg_idx++;
         } else {
             break;
         }
     }
 
     if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--quiet] [--include .txt,.md,.cpp] <model_path> <directory_path> <output_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--quiet] [--prefix] [--include .txt,.md,.cpp] <model_path> <directory_path> <output_file>" << std::endl;
         return 1;
     }
 
@@ -79,16 +84,23 @@ int main(int argc, char ** argv) {
                 continue;
             }
 
-            auto tokens = std::vector<llama_token>(content.size() + 2);
-            int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), tokens.data(), tokens.size(), true, true);
+            std::string input = use_prefix ? "search_document: " + content : content;
+
+            auto tokens = std::vector<llama_token>(input.size() + 2);
+            int n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
             if (n_tokens < 0) {
                 tokens.resize(-n_tokens);
-                n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), tokens.data(), tokens.size(), true, true);
+                n_tokens = llama_tokenize(vocab, input.c_str(), input.size(), tokens.data(), tokens.size(), true, true);
             }
             tokens.resize(n_tokens);
 
             // Limit to context size
             int n_to_decode = std::min((int)tokens.size(), (int)cparams.n_ctx);
+            if (n_to_decode < n_tokens && !g_quiet) {
+                std::cerr << "\n    Warning: truncated from " << n_tokens << " to " << n_to_decode << " tokens" << std::endl;
+            }
+
+            llama_kv_self_clear(ctx);
             llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
             if (llama_decode(ctx, batch) != 0) {
                 if (!g_quiet) std::cout << " Failed (decode error)" << std::endl;
@@ -105,6 +117,7 @@ int main(int argc, char ** argv) {
             rec.filename = entry.path().string();
             rec.text = content.substr(0, 200) + "...";
             rec.embedding.assign(emb, emb + llama_model_n_embd(model));
+            normalize_embedding(rec.embedding);
             store.push_back(rec);
             if (!g_quiet) std::cout << " Done (" << n_tokens << " tokens)" << std::endl;
         }

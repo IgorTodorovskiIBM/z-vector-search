@@ -3,6 +3,7 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include "llama.h"
 #include "common_store.h"
 
@@ -49,6 +50,8 @@ void print_json(const std::string& query, const std::vector<Record>& store, cons
 
 int main(int argc, char ** argv) {
     bool json_output = false;
+    bool use_prefix = false;
+    int top_k = 3;
     int arg_idx = 1;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
@@ -56,6 +59,11 @@ int main(int argc, char ** argv) {
             json_output = true;
         } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
+        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
+            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
+            top_k = std::atoi(argv[arg_idx + 1]);
+            arg_idx++;
         } else {
             break;
         }
@@ -63,7 +71,7 @@ int main(int argc, char ** argv) {
     }
 
     if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--json] [--quiet] <model_path> <store_file> <query>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--json] [--quiet] [--prefix] [--top-k N] <model_path> <store_file> <query>" << std::endl;
         return 1;
     }
 
@@ -91,21 +99,25 @@ int main(int argc, char ** argv) {
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) return 1;
 
-    auto q_tokens = std::vector<llama_token>(query.size() + 2);
-    int n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), q_tokens.data(), q_tokens.size(), true, true);
+    std::string q_input = use_prefix ? "search_query: " + query : query;
+
+    auto q_tokens = std::vector<llama_token>(q_input.size() + 2);
+    int n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(), q_tokens.data(), q_tokens.size(), true, true);
     if (n_q_tokens < 0) {
         q_tokens.resize(-n_q_tokens);
-        n_q_tokens = llama_tokenize(vocab, query.c_str(), query.size(), q_tokens.data(), q_tokens.size(), true, true);
+        n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(), q_tokens.data(), q_tokens.size(), true, true);
     }
     q_tokens.resize(n_q_tokens);
 
+    llama_kv_self_clear(ctx);
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) return 1;
-    
+
     float * q_emb = (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
     if (!q_emb) return 1;
-    
+
     std::vector<float> query_vec(q_emb, q_emb + llama_model_n_embd(model));
+    normalize_embedding(query_vec);
 
     std::vector<std::pair<float, int>> results;
     for (int i = 0; i < (int)store.size(); ++i) {
@@ -114,10 +126,10 @@ int main(int argc, char ** argv) {
     std::sort(results.rbegin(), results.rend());
 
     if (json_output) {
-        print_json(query, store, results, 3);
+        print_json(query, store, results, top_k);
     } else {
         if (!g_quiet) std::cout << "\nResults for: \"" << query << "\"" << std::endl;
-        for (int i = 0; i < std::min((int)results.size(), 3); ++i) {
+        for (int i = 0; i < std::min((int)results.size(), top_k); ++i) {
             auto & res = store[results[i].second];
             std::cout << "[" << i+1 << "] Similarity: " << results[i].first << " | File: " << res.filename << std::endl;
             std::cout << "    Snippet: " << res.text << "\n" << std::endl;
