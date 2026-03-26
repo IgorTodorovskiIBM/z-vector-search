@@ -109,7 +109,7 @@ int main(int argc, char ** argv) {
     }
     q_tokens.resize(n_q_tokens);
 
-    llama_kv_self_clear(ctx);
+    llama_memory_clear(llama_get_memory(ctx), true);
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) return 1;
 

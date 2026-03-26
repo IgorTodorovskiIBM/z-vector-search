@@ -100,7 +100,7 @@ int main(int argc, char ** argv) {
                 std::cerr << "\n    Warning: truncated from " << n_tokens << " to " << n_to_decode << " tokens" << std::endl;
             }
 
-            llama_kv_self_clear(ctx);
+            llama_memory_clear(llama_get_memory(ctx), true);
             llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
             if (llama_decode(ctx, batch) != 0) {
                 if (!g_quiet) std::cout << " Failed (decode error)" << std::endl;

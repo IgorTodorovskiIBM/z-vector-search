@@ -102,7 +102,7 @@ int main(int argc, char ** argv) {
                 std::cerr << "\n    Warning: truncated from " << n_tokens << " to " << n_to_decode << " tokens" << std::endl;
             }
 
-            llama_kv_self_clear(ctx);
+            llama_memory_clear(llama_get_memory(ctx), true);
             llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
             if (llama_decode(ctx, batch) != 0) {
                 std::cerr << " Failed (decode error)" << std::endl;
@@ -151,7 +151,7 @@ int main(int argc, char ** argv) {
     }
     query_tokens.resize(n_q_tokens);
 
-    llama_kv_self_clear(ctx);
+    llama_memory_clear(llama_get_memory(ctx), true);
     llama_batch q_batch = llama_batch_get_one(query_tokens.data(), query_tokens.size());
     if (llama_decode(ctx, q_batch) != 0) {
         std::cerr << "Error: failed to decode query" << std::endl;
