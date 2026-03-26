@@ -6,39 +6,31 @@
 #include <algorithm>
 #include <cmath>
 #include "llama.h"
+#include "common_store.h"
 
 namespace fs = std::filesystem;
 
-struct Record {
-    std::string filename;
-    std::string text;
-    std::vector<float> embedding;
-};
-
-// Calculate proper cosine similarity
-float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
-    if (a.size() != b.size() || a.empty()) return 0.0f;
-    double dot = 0.0;
-    double norm_a = 0.0;
-    double norm_b = 0.0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        dot += (double)a[i] * (double)b[i];
-        norm_a += (double)a[i] * (double)a[i];
-        norm_b += (double)b[i] * (double)b[i];
-    }
-    if (norm_a == 0.0 || norm_b == 0.0) return 0.0f;
-    return (float)(dot / (std::sqrt(norm_a) * std::sqrt(norm_b)));
-}
-
 int main(int argc, char ** argv) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <model_path> <directory_path> <query>" << std::endl;
+    int arg_idx = 1;
+    std::vector<std::string> suffixes = {".txt", ".md"};
+
+    while (arg_idx < argc && argv[arg_idx][0] == '-') {
+        if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
+            suffixes = parse_suffixes(argv[arg_idx + 1]);
+            arg_idx += 2;
+        } else {
+            break;
+        }
+    }
+
+    if (argc - arg_idx < 3) {
+        std::cerr << "Usage: " << argv[0] << " [--include .txt,.md,.cpp] <model_path> <directory_path> <query>" << std::endl;
         return 1;
     }
 
-    std::string model_path = argv[1];
-    std::string dir_path = argv[2];
-    std::string query = argv[3];
+    std::string model_path = argv[arg_idx++];
+    std::string dir_path = argv[arg_idx++];
+    std::string query = argv[arg_idx++];
 
     // 1. Initialize llama.cpp
     llama_backend_init();
@@ -55,6 +47,8 @@ int main(int argc, char ** argv) {
     auto cparams = llama_context_default_params();
     cparams.embeddings = true; // MUST be true
     cparams.n_ctx = 2048;      // Match model context length
+    cparams.n_batch = 2048;
+    cparams.n_ubatch = 2048;
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
         std::cerr << "Error: failed to create context" << std::endl;
@@ -67,12 +61,19 @@ int main(int argc, char ** argv) {
     std::vector<Record> database;
 
     // 2. Scan directory and embed files
-    std::cout << "Indexing directory: " << dir_path << "..." << std::endl;
+    std::cout << "Indexing directory: " << dir_path << " (suffixes: ";
+    for (size_t i = 0; i < suffixes.size(); ++i) std::cout << suffixes[i] << (i == suffixes.size() - 1 ? "" : ", ");
+    std::cout << ")..." << std::endl;
     for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
-        if (entry.is_regular_file() && (entry.path().extension() == ".txt" || entry.path().extension() == ".md")) {
+        if (entry.is_regular_file() && has_suffix(entry.path().string(), suffixes)) {
+            std::cout << "  - Processing: " << entry.path().filename() << "..." << std::flush;
+
             std::ifstream file(entry.path());
             std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            if (content.empty()) continue;
+            if (content.empty()) {
+                std::cout << " Skipped (empty)" << std::endl;
+                continue;
+            }
 
             // Tokenize
             auto tokens = std::vector<llama_token>(content.size() + 2);
@@ -86,20 +87,20 @@ int main(int argc, char ** argv) {
             // Decode
             llama_batch batch = llama_batch_get_one(tokens.data(), std::min((int)tokens.size(), (int)cparams.n_ctx));
             if (llama_decode(ctx, batch) != 0) {
-                std::cerr << "  Failed to decode: " << entry.path().filename() << std::endl;
+                std::cerr << " Failed (decode error)" << std::endl;
                 continue;
             }
 
             // Get Embedding
             float * emb = nullptr;
             if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-                emb = llama_get_embeddings_ith(ctx, tokens.size() - 1); // last token
+                emb = llama_get_embeddings_ith(ctx, std::min((int)tokens.size(), (int)cparams.n_ctx) - 1); // last token
             } else {
                 emb = llama_get_embeddings_seq(ctx, 0); // sequence 0
             }
 
             if (!emb) {
-                std::cerr << "  Failed to get embedding for: " << entry.path().filename() << std::endl;
+                std::cerr << " Failed (no embedding)" << std::endl;
                 continue;
             }
 
@@ -110,7 +111,7 @@ int main(int argc, char ** argv) {
             rec.embedding.assign(emb, emb + n_embd);
             database.push_back(rec);
             
-            std::cout << "  Embedded: " << entry.path().filename() << " (tokens: " << tokens.size() << ")" << std::endl;
+            std::cout << " Done (" << tokens.size() << " tokens)" << std::endl;
         }
     }
 

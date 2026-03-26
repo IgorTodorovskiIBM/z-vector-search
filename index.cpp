@@ -20,13 +20,22 @@ void llama_log_callback(enum ggml_log_level level, const char * text, void * use
 
 int main(int argc, char ** argv) {
     int arg_idx = 1;
-    if (argc > 1 && strcmp(argv[1], "--quiet") == 0) {
-        g_quiet = true;
-        arg_idx++;
+    std::vector<std::string> suffixes = {".txt", ".md"};
+
+    while (arg_idx < argc && argv[arg_idx][0] == '-') {
+        if (strcmp(argv[arg_idx], "--quiet") == 0) {
+            g_quiet = true;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
+            suffixes = parse_suffixes(argv[arg_idx + 1]);
+            arg_idx += 2;
+        } else {
+            break;
+        }
     }
 
     if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--quiet] <model_path> <directory_path> <output_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--quiet] [--include .txt,.md,.cpp] <model_path> <directory_path> <output_file>" << std::endl;
         return 1;
     }
 
@@ -54,12 +63,21 @@ int main(int argc, char ** argv) {
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
     std::vector<Record> store;
 
-    if (!g_quiet) std::cout << "Indexing: " << dir_path << std::endl;
+    if (!g_quiet) {
+        std::cout << "Indexing: " << dir_path << " (suffixes: ";
+        for (size_t i = 0; i < suffixes.size(); ++i) std::cout << suffixes[i] << (i == suffixes.size() - 1 ? "" : ", ");
+        std::cout << ")" << std::endl;
+    }
     for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
-        if (entry.is_regular_file() && (entry.path().extension() == ".txt" || entry.path().extension() == ".md")) {
+        if (entry.is_regular_file() && has_suffix(entry.path().string(), suffixes)) {
+            if (!g_quiet) std::cout << "  - Processing: " << entry.path().filename() << "..." << std::flush;
+
             std::ifstream file(entry.path());
             std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            if (content.empty()) continue;
+            if (content.empty()) {
+                if (!g_quiet) std::cout << " Skipped (empty)" << std::endl;
+                continue;
+            }
 
             auto tokens = std::vector<llama_token>(content.size() + 2);
             int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), tokens.data(), tokens.size(), true, true);
@@ -72,17 +90,23 @@ int main(int argc, char ** argv) {
             // Limit to context size
             int n_to_decode = std::min((int)tokens.size(), (int)cparams.n_ctx);
             llama_batch batch = llama_batch_get_one(tokens.data(), n_to_decode);
-            if (llama_decode(ctx, batch) != 0) continue;
+            if (llama_decode(ctx, batch) != 0) {
+                if (!g_quiet) std::cout << " Failed (decode error)" << std::endl;
+                continue;
+            }
 
             float * emb = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, n_to_decode - 1) : llama_get_embeddings_seq(ctx, 0);
-            if (!emb) continue;
+            if (!emb) {
+                if (!g_quiet) std::cout << " Failed (no embedding)" << std::endl;
+                continue;
+            }
 
             Record rec;
             rec.filename = entry.path().string();
             rec.text = content.substr(0, 200) + "...";
             rec.embedding.assign(emb, emb + llama_model_n_embd(model));
             store.push_back(rec);
-            if (!g_quiet) std::cout << "  - " << entry.path().filename() << std::endl;
+            if (!g_quiet) std::cout << " Done (" << n_tokens << " tokens)" << std::endl;
         }
     }
 

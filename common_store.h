@@ -7,11 +7,36 @@
 #include <iostream>
 #include <cmath>
 
+#include <sstream>
+#include <algorithm>
+
 struct Record {
     std::string filename;
     std::string text;
     std::vector<float> embedding;
 };
+
+inline std::vector<std::string> parse_suffixes(const std::string& input) {
+    std::vector<std::string> suffixes;
+    std::stringstream ss(input);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (!item.empty()) {
+            if (item[0] != '.') item = "." + item;
+            suffixes.push_back(item);
+        }
+    }
+    return suffixes;
+}
+
+inline bool has_suffix(const std::string& filename, const std::vector<std::string>& suffixes) {
+    for (const auto& s : suffixes) {
+        if (filename.size() >= s.size() && filename.compare(filename.size() - s.size(), s.size(), s) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // Simple binary serialization
 inline void save_store(const std::string& path, const std::vector<Record>& store) {
