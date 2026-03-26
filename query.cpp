@@ -99,6 +99,8 @@ int main(int argc, char ** argv) {
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) return 1;
 
+    const bool is_encoder = llama_model_has_encoder(model);
+
     std::string q_input = use_prefix ? "search_query: " + query : query;
 
     auto q_tokens = std::vector<llama_token>(q_input.size() + 2);
@@ -111,7 +113,8 @@ int main(int argc, char ** argv) {
 
     llama_memory_clear(llama_get_memory(ctx), false);
     llama_batch q_batch = llama_batch_get_one(q_tokens.data(), q_tokens.size());
-    if (llama_decode(ctx, q_batch) != 0) return 1;
+    int rc = is_encoder ? llama_encode(ctx, q_batch) : llama_decode(ctx, q_batch);
+    if (rc != 0) return 1;
 
     float * q_emb = (llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE) ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1) : llama_get_embeddings_seq(ctx, 0);
     if (!q_emb) return 1;

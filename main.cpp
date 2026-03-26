@@ -73,6 +73,7 @@ int main(int argc, char ** argv) {
     }
 
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+    const bool is_encoder = llama_model_has_encoder(model);
     const int n_ctx = (int)cparams.n_ctx;
     const int n_embd = llama_model_n_embd(model);
 
@@ -164,7 +165,7 @@ int main(int argc, char ** argv) {
                 batch.pos[batch.n_tokens]        = t;
                 batch.n_seq_id[batch.n_tokens]   = 1;
                 batch.seq_id[batch.n_tokens][0]  = seq_id;
-                batch.logits[batch.n_tokens]     = false;
+                batch.logits[batch.n_tokens]     = is_encoder ? true : false;
                 last_token_pos[bi] = batch.n_tokens;
                 batch.n_tokens++;
             }
@@ -176,8 +177,9 @@ int main(int argc, char ** argv) {
             }
         }
 
-        if (llama_decode(ctx, batch) != 0) {
-            std::cerr << "  Batch decode failed, skipping " << batch_indices.size() << " files" << std::endl;
+        int rc = is_encoder ? llama_encode(ctx, batch) : llama_decode(ctx, batch);
+        if (rc != 0) {
+            std::cerr << "  Batch encode failed, skipping " << batch_indices.size() << " files" << std::endl;
             llama_batch_free(batch);
             continue;
         }
@@ -229,8 +231,9 @@ int main(int argc, char ** argv) {
 
     llama_memory_clear(llama_get_memory(ctx), false);
     llama_batch q_batch = llama_batch_get_one(query_tokens.data(), query_tokens.size());
-    if (llama_decode(ctx, q_batch) != 0) {
-        std::cerr << "Error: failed to decode query" << std::endl;
+    int q_rc = is_encoder ? llama_encode(ctx, q_batch) : llama_decode(ctx, q_batch);
+    if (q_rc != 0) {
+        std::cerr << "Error: failed to encode query" << std::endl;
         return 1;
     }
 
