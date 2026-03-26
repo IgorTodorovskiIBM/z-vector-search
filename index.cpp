@@ -71,11 +71,14 @@ int main(int argc, char ** argv) {
     if (!model) return 1;
 
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
+    int max_seqs = (2048 / chunk_size) + 1;
+
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
     cparams.n_ctx = 2048;
     cparams.n_batch = 2048;
     cparams.n_ubatch = 2048;
+    cparams.n_seq_max = max_seqs;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) return 1;
