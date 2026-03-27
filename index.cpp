@@ -32,8 +32,14 @@ int main(int argc, char ** argv) {
     int chunk_size = 256;
     int chunk_overlap = 64;
 
+    int n_threads = 4;
+
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--quiet") == 0) {
+        if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
+            n_threads = std::atoi(argv[arg_idx + 1]);
+            arg_idx += 2;
+            continue;
+        } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
@@ -55,7 +61,8 @@ int main(int argc, char ** argv) {
 
     if (argc - arg_idx < 3) {
         std::cerr << "Usage: " << argv[0] << " [--quiet] [--prefix] [--include .txt,.md,.cpp]"
-                  << " [--chunk-size N] [--chunk-overlap N] <model_path> <directory_path> <output_file>" << std::endl;
+                  << " [--chunk-size N] [--chunk-overlap N] [--threads N]"
+                  << " <model_path> <directory_path> <output_file>" << std::endl;
         return 1;
     }
 
@@ -71,14 +78,15 @@ int main(int argc, char ** argv) {
     if (!model) return 1;
 
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
-    int max_seqs = (2048 / chunk_size) + 1;
 
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
-    cparams.n_ctx = 2048;
-    cparams.n_batch = 2048;
-    cparams.n_ubatch = 2048;
-    cparams.n_seq_max = max_seqs;
+    cparams.n_ctx = chunk_size + 16;
+    cparams.n_batch = chunk_size + 16;
+    cparams.n_ubatch = chunk_size + 16;
+    cparams.n_seq_max = 1;
+    cparams.n_threads = n_threads;
+    cparams.n_threads_batch = n_threads;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) return 1;
@@ -193,89 +201,48 @@ int main(int argc, char ** argv) {
     if (!g_quiet) std::cout << "Scanned " << files_scanned << " files -> " << chunks.size()
                             << " chunks. Encoding..." << std::endl;
 
-    // Phase 2: Batch encode chunks
+    // Phase 2: Encode chunks one at a time (avoids multi-sequence graph splits)
     std::vector<Record> store;
     store.reserve(chunks.size());
 
-    size_t ch_idx = 0;
-    while (ch_idx < chunks.size()) {
-        std::vector<size_t> batch_indices;
-        int total_tokens = 0;
-
-        while (ch_idx < chunks.size()) {
-            int ch_tokens = (int)chunks[ch_idx].tokens.size();
-            if (batch_indices.empty() && ch_tokens >= n_ctx) {
-                batch_indices.push_back(ch_idx++);
-                total_tokens = std::min(ch_tokens, n_ctx);
-                break;
-            }
-            if (total_tokens + ch_tokens > n_ctx) break;
-            batch_indices.push_back(ch_idx++);
-            total_tokens += ch_tokens;
-        }
-
-        if (batch_indices.empty()) break;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        auto & ch = chunks[i];
+        int n_tok = std::min((int)ch.tokens.size(), n_ctx);
 
         llama_memory_clear(llama_get_memory(ctx), false);
-        llama_batch batch = llama_batch_init(total_tokens, 0, 1);
-
-        std::vector<int> last_token_pos(batch_indices.size(), -1);
-
-        for (size_t bi = 0; bi < batch_indices.size(); ++bi) {
-            auto & ch = chunks[batch_indices[bi]];
-            llama_seq_id seq_id = (llama_seq_id)bi;
-            int n_tok = std::min((int)ch.tokens.size(), n_ctx);
-
-            for (int t = 0; t < n_tok; ++t) {
-                batch.token[batch.n_tokens]      = ch.tokens[t];
-                batch.pos[batch.n_tokens]        = t;
-                batch.n_seq_id[batch.n_tokens]   = 1;
-                batch.seq_id[batch.n_tokens][0]  = seq_id;
-                batch.logits[batch.n_tokens]     = is_encoder ? true : false;
-                last_token_pos[bi] = batch.n_tokens;
-                batch.n_tokens++;
-            }
-        }
-
-        if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-            for (int pos : last_token_pos) {
-                if (pos >= 0) batch.logits[pos] = true;
-            }
-        }
+        llama_batch batch = build_single_seq_batch(ch.tokens.data(), n_tok, is_encoder);
 
         if (embed_batch(ctx, batch, is_encoder) != 0) {
-            if (!g_quiet) std::cerr << "  Batch encode failed, skipping " << batch_indices.size() << " chunks" << std::endl;
-            llama_batch_free(batch);
+            if (!g_quiet) std::cerr << "  Encode failed, skipping: " << ch.filename << std::endl;
+            if (is_encoder) llama_batch_free(batch);
             continue;
         }
 
-        for (size_t bi = 0; bi < batch_indices.size(); ++bi) {
-            auto & ch = chunks[batch_indices[bi]];
-            float * emb = nullptr;
-
-            if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-                emb = llama_get_embeddings_ith(ctx, last_token_pos[bi]);
-            } else {
-                emb = llama_get_embeddings_seq(ctx, (llama_seq_id)bi);
-            }
-
-            if (!emb) {
-                if (!g_quiet) std::cerr << "  Failed (no embedding): " << ch.filename << std::endl;
-                continue;
-            }
-
-            Record rec;
-            rec.filename = std::move(ch.filename);
-            rec.text = std::move(ch.snippet);
-            rec.embedding.assign(emb, emb + n_embd);
-            normalize_embedding(rec.embedding);
-            store.push_back(std::move(rec));
+        float * emb = nullptr;
+        if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
+            emb = llama_get_embeddings_ith(ctx, n_tok - 1);
+        } else {
+            emb = llama_get_embeddings_seq(ctx, 0);
         }
 
-        llama_batch_free(batch);
+        if (!emb) {
+            if (!g_quiet) std::cerr << "  Failed (no embedding): " << ch.filename << std::endl;
+            if (is_encoder) llama_batch_free(batch);
+            continue;
+        }
 
-        if (!g_quiet) std::cout << "  Batch done: " << batch_indices.size() << " chunks, "
-                                << total_tokens << " tokens" << std::endl;
+        Record rec;
+        rec.filename = std::move(ch.filename);
+        rec.text = std::move(ch.snippet);
+        rec.embedding.assign(emb, emb + n_embd);
+        normalize_embedding(rec.embedding);
+        store.push_back(std::move(rec));
+
+        if (is_encoder) llama_batch_free(batch);
+
+        if (!g_quiet && (i + 1) % 10 == 0) {
+            std::cout << "  Encoded " << (i + 1) << "/" << chunks.size() << " chunks" << std::endl;
+        }
     }
 
     save_store(store_path, store);
