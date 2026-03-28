@@ -1,6 +1,6 @@
 # z-vector-search
 
-A high-performance semantic search tool for z/OS powered by `llama.cpp`. This project allows you to index a directory of documents into a vector store and perform sub-second semantic searches using embedding models.
+A high-performance semantic search tool for z/OS powered by `llama.cpp` and `sqlite-vec`. Index directories of documents into a persistent vector store and perform sub-second semantic searches using embedding models. Supports incremental indexing — only new or modified files are re-encoded.
 
 ## Prerequisites
 
@@ -38,30 +38,74 @@ make
 
 Semantic search is performed in two steps: **Indexing** and **Querying**.
 
-### 1. Indexing (The "Embed" Step)
-The `z-index` tool scans a directory, generates embedding vectors for every `.txt` and `.md` file, and saves them to a binary store.
+### 1. Indexing
+
+The `z-index` tool scans a directory, generates embedding vectors for every matching file, and saves them to a SQLite database backed by `sqlite-vec`.
 
 ```bash
-./z-index <model.gguf> <docs_directory> <output_store.bin>
-```
-*Example:*
-```bash
-./z-index nomic-embed-text-v1.5.Q4_K_M.gguf ./my_docs my_store.bin
+./z-index [OPTIONS] <model.gguf> <docs_directory> <store.db>
 ```
 
-### 2. Querying (The "Search" Step)
-The `z-query` tool loads the pre-computed store and performs a mathematical comparison against your query.
+**Example:**
+```bash
+./z-index nomic-embed-text-v1.5.Q4_K_M.gguf ./my_docs my_store.db
+```
+
+**Incremental indexing** — run the same command again and only new or modified files will be re-indexed. Deleted files are automatically removed from the store:
+
+```
+Scanned 15 files -> 8 chunks to encode.
+  New: 3, Updated: 2, Removed: 1, Skipped (unchanged): 9
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--include .txt,.md,.cpp` | Comma-separated file suffixes to index (default: `.txt,.md`) |
+| `--prefix` | Add `search_document:` prefix for asymmetric embedding models |
+| `--chunk-size N` | Tokens per chunk (default: 256) |
+| `--chunk-overlap N` | Overlap between chunks (default: 64) |
+| `--threads N` | Number of encoding threads (default: 4) |
+| `--source-type TYPE` | Tag chunks with a type (e.g., `ibm_doc`, `runbook`, `source`) |
+| `--quiet` | Suppress progress output |
+
+### 2. Querying
+
+The `z-query` tool searches the pre-computed store using vector similarity.
 
 ```bash
-./z-query <model.gguf> <input_store.bin> "<search_query>"
+./z-query [OPTIONS] <model.gguf> <store.db> "<search_query>"
 ```
-*Example:*
+
+**Example:**
 ```bash
-./z-query nomic-embed-text-v1.5.Q4_K_M.gguf my_store.bin "How do I build on z/OS?"
+./z-query nomic-embed-text-v1.5.Q4_K_M.gguf my_store.db "How do I build on z/OS?"
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--top-k N` | Number of results to return (default: 3) |
+| `--prefix` | Add `search_query:` prefix for asymmetric embedding models |
+| `--source-type TYPE` | Filter results by source type |
+| `--json` | Output results as JSON |
+| `--quiet` | Suppress llama.cpp logs |
+
+### 3. One-Shot Mode
+
+The `z-vector-search` tool indexes and queries in a single run (no persistent store):
+
+```bash
+./z-vector-search [OPTIONS] <model.gguf> <docs_directory> "<search_query>"
 ```
 
 ## Implementation Details
+
+- **Storage:** SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) for persistent, incremental vector storage with metadata filtering.
 - **Architecture:** Optimized for z/OS with Enhanced ASCII and IBM Z-specific compiler flags.
 - **Pooling:** Uses MEAN pooling by default (optimized for BERT-based embedding models like Nomic).
-- **Similarity:** Uses Cosine Similarity via BLIS-accelerated dot products.
+- **Similarity:** sqlite-vec KNN search with cosine distance. Embeddings are L2-normalized at index time.
 - **Character Set:** Fully EBCDIC/ASCII compatible.
+- **Chunking:** Large files are split into overlapping chunks for better search accuracy.
