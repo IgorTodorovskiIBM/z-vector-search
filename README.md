@@ -142,7 +142,40 @@ pcon -r | ./z-console model.gguf store.db
 
 The tool automatically filters for high-value messages: ABENDs (IEF), data management errors (IEC), security (ICH/RACF), CICS (DFH), DB2 (DSN), MQ (CSQ), and any message with error (`E`) or action (`A`) severity.
 
-### 4. One-Shot Mode
+### 4. Console Ingestion (z-ingest-console)
+
+The `z-ingest-console` tool indexes SYSLOG history into the vector store so that z-console can surface past occurrences and patterns. It runs `pcon`, groups console messages into time-windowed chunks, embeds them, and inserts with `source_type=operlog`.
+
+**Ingest the last day of console output:**
+```bash
+./z-ingest-console model.gguf store.db -d
+```
+
+**Ingest the last week, 10-minute windows:**
+```bash
+./z-ingest-console --window 10 model.gguf store.db -w
+```
+
+**Run periodically via cron (incremental — skips already-ingested windows):**
+```bash
+# Every hour, ingest the last hour of console
+0 * * * * /path/to/z-ingest-console --quiet model.gguf store.db -l
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--window N` | Minutes per chunk (default: 5) |
+| `--threads N` | Encoding threads (default: 4) |
+| `--prefix` | Add `search_document:` prefix |
+| `--quiet` | Suppress progress output |
+
+Pcon flags (`-r`, `-l`, `-d`, `-w`, `-t N`, `-S SYSNAME`, `-A`) are passed through.
+
+The tool tracks a high-water mark in the store, so running it repeatedly only indexes new data. Over time, the store builds up operational history that z-console uses to show "this message last appeared on DATE, and here's what happened next."
+
+### 5. One-Shot Mode
 
 The `z-vector-search` tool indexes and queries in a single run (no persistent store):
 

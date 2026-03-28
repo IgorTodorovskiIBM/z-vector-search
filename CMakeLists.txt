@@ -96,4 +96,7 @@ target_link_libraries(z-vector-search ${LLAMA_LIBS})
 add_executable(z-console console.cpp)
 target_link_libraries(z-console ${ALL_LIBS})
 
-install(TARGETS z-index z-query z-vector-search z-console DESTINATION bin)
+add_executable(z-ingest-console ingest_console.cpp)
+target_link_libraries(z-ingest-console ${ALL_LIBS})
+
+install(TARGETS z-index z-query z-vector-search z-console z-ingest-console DESTINATION bin)
