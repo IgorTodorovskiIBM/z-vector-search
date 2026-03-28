@@ -5,7 +5,6 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
-#include <regex>
 #include <algorithm>
 #include "llama.h"
 #include "common_store.h"
@@ -35,19 +34,107 @@ std::string escape_json(const std::string& s) {
     return res;
 }
 
-// A parsed console message
+// Trim leading/trailing whitespace
+static std::string trim(const std::string &s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+// A parsed console message (may span multiple SYSLOG lines)
 struct ConsoleMessage {
-    std::string timestamp;
-    std::string jobname;
-    std::string msgid;
-    std::string text;       // full message line
-    char severity;          // I=info, W=warning, E=error, A=action
+    std::string timestamp;   // HH:MM:SS.TH
+    std::string sysname;     // e.g. SA2B
+    std::string jobname;     // e.g. STC03745, JOB03749
+    std::string msgid;       // e.g. BPXF274I, IEF450I
+    std::string text;        // full message text (continuation lines joined)
+    char severity = ' ';     // last char of msgid: I/E/W/A/S/D/X
+    int count = 1;           // how many times this msgid appeared
 };
+
+// Check if a character is a SYSLOG record type indicator.
+// N=normal, M=multi-line start, X=system, C=command
+// S=continuation, D=data continuation, E=end continuation
+static bool is_record_type(char c) {
+    return c == 'N' || c == 'M' || c == 'X' || c == 'C' ||
+           c == 'S' || c == 'D' || c == 'E';
+}
+
+// Check if a line is a continuation of the previous message (S/D/E record type)
+static bool is_continuation(const std::string &line) {
+    if (line.empty()) return false;
+    char c = line[0];
+    return c == 'S' || c == 'D' || c == 'E';
+}
+
+// Try to extract a z/OS message ID from the message text portion of a SYSLOG line.
+// Message IDs are 2-8 uppercase letters followed by 1-5 digits and a severity letter.
+// Examples: IEF450I, BPXF274I, IEC030I, $HASP100, ICH70001I
+static std::string extract_msgid(const std::string &text) {
+    // Scan for message ID pattern
+    size_t i = 0;
+    size_t len = text.size();
+    while (i < len) {
+        // Skip to start of a potential message ID (uppercase letter or $)
+        while (i < len && !isupper(text[i]) && text[i] != '$') i++;
+        if (i >= len) break;
+
+        size_t start = i;
+        // Consume prefix letters (and $#@)
+        while (i < len && (isupper(text[i]) || text[i] == '$' || text[i] == '#' || text[i] == '@')) i++;
+        size_t alpha_len = i - start;
+        if (alpha_len < 2 || alpha_len > 8) { continue; }
+
+        // Consume digits
+        size_t digit_start = i;
+        while (i < len && isdigit(text[i])) i++;
+        size_t digit_len = i - digit_start;
+        if (digit_len < 1 || digit_len > 5) { continue; }
+
+        // Check for severity letter
+        if (i < len && isupper(text[i])) {
+            char sev = text[i];
+            if (sev == 'I' || sev == 'E' || sev == 'W' || sev == 'A' ||
+                sev == 'S' || sev == 'D' || sev == 'X') {
+                i++;
+                // Verify it's followed by whitespace or end (not part of a longer word)
+                if (i >= len || text[i] == ' ' || text[i] == '\t' || text[i] == '\n') {
+                    return text.substr(start, i - start);
+                }
+            }
+        }
+    }
+    return "";
+}
 
 // Known high-value message prefixes that warrant RAG lookup
 static bool is_interesting_message(const std::string &msgid) {
-    // Action/error severity
     if (msgid.empty()) return false;
+
+    // Skip noisy messages that appear constantly
+    static const char *skip_msgids[] = {
+        "IEF196I",   // Allocation details (very frequent, low value)
+        "IEF695I",   // Job assignment (informational)
+        "IEF285I",   // Volume/dataset allocation
+        "IEF237I",   // JES2 allocation
+        "IGD103I",   // SMS allocation
+        "IGD104I",   // Dataset retained
+        "IRR010I",   // Userid assigned
+        "ICH70001I", // Last access notification
+        "IEF188I",   // Problem program attributes
+        "IEE042I",   // System log initialized
+        "IEF176I",   // Writer waiting for work
+        nullptr
+    };
+    for (int i = 0; skip_msgids[i]; i++) {
+        if (msgid == skip_msgids[i]) return false;
+    }
+
+    // Skip all $HASP messages (JES2 chatter: job start/end/spool)
+    if (msgid.compare(0, 5, "$HASP") == 0) return false;
+
+    // Action/error severity always interesting
     char sev = msgid.back();
     if (sev == 'A' || sev == 'E') return true;
 
@@ -56,23 +143,29 @@ static bool is_interesting_message(const std::string &msgid) {
         "IEF",   // Job/step management (ABEND messages)
         "IEC",   // Data management errors
         "IEA",   // Supervisor messages
+        "IEE",   // Master scheduler / console
         "IGD",   // SMS/DFSMS
         "ICH",   // RACF security
+        "IRR",   // RACF
         "CSV",   // Contents supervisor
-        "IEE",   // Master scheduler / console
         "IOS",   // I/O supervisor
         "IGF",   // Generalized trace facility
         "IXC",   // XCF/XES coupling
         "IXL",   // Coupling facility
         "ARC",   // DFHSM
         "ADR",   // DFDSS
-        "DFHSM", // HSM
         "DFH",   // CICS
         "DSN",   // DB2
         "CSQ",   // MQ
         "IST",   // VTAM
         "EZA",   // TCP/IP
-        "BPXM",  // UNIX System Services
+        "EZB",   // TCP/IP
+        "EZY",   // AT-TLS
+        "BPXF",  // USS file system (mount failures etc.)
+        "BPXM",  // USS kernel
+        "BPXP",  // USS process
+        "IKJ",   // TSO
+        "CRE",   // Automation
         nullptr
     };
 
@@ -85,39 +178,113 @@ static bool is_interesting_message(const std::string &msgid) {
 }
 
 // Parse SYSLOG lines into structured messages.
-// Typical SYSLOG format:
-//   N 0000000 SYSNAME  YYDDD HH:MM:SS.TH JOBID    FLAGS    MSGID message text...
-// The exact format varies, but message IDs follow a pattern: 2-8 alpha chars + digit(s) + severity letter
+// SYSLOG line format (from pcon output):
+//   Col 0:   Record type (N/M/X/C/S/D/E) + modifier flags
+//   Col 1-2: Flags
+//   ~Col 10: System name (e.g. SA2B)
+//   ~Col 19: Julian date YYYYDDD
+//   ~Col 27: Timestamp HH:MM:SS.TH
+//   ~Col 39: Job name/ID
+//   ~Col 49: Message flags
+//   ~Col 59: Message text (contains message ID + text)
+//
+// S/D/E lines are continuations of the prior M/N line.
 static std::vector<ConsoleMessage> parse_syslog(const std::string &raw) {
     std::vector<ConsoleMessage> messages;
-    // Match message IDs like IEF450I, IEC030I, BPXM023E, CSQ9022I, etc.
-    std::regex msgid_re("\\b([A-Z$#@]{2,8}[0-9]{1,5}[IEWASDX])\\b");
 
     std::istringstream stream(raw);
     std::string line;
+
     while (std::getline(stream, line)) {
-        if (line.size() < 30) continue;  // skip short/blank lines
+        if (line.size() < 10) continue;
+
+        // Check if this is a continuation line
+        if (is_continuation(line)) {
+            // Append continuation text to the last message
+            if (!messages.empty()) {
+                // Extract the text portion (skip the record type and padding)
+                std::string cont_text = trim(line.substr(1));
+                if (!cont_text.empty()) {
+                    messages.back().text += " " + cont_text;
+                }
+            }
+            continue;
+        }
+
+        // Not a continuation — this is a new message line (N/M/X/C)
+        if (!is_record_type(line[0])) continue;
+
+        // Extract message text — everything after the flags/system/date/time/job fields
+        // Find the message text by looking for the message portion after the fixed fields.
+        // The message text typically starts around column 58-60, after the second flags field.
+        // We'll find it by looking for the message ID pattern in the latter part of the line.
+        std::string msg_text;
+        std::string timestamp;
+        std::string sysname;
+        std::string jobname;
+
+        // Try to extract sysname (typically at position ~10, 4-8 chars)
+        // Look for the system name field between the initial flags
+        size_t pos = 1;
+        // Skip flag characters
+        while (pos < line.size() && (line[pos] == ' ' || isxdigit(line[pos]) || isupper(line[pos]))) {
+            if (pos > 1 && line[pos] == ' ') break;
+            pos++;
+        }
+        // Skip spaces
+        while (pos < line.size() && line[pos] == ' ') pos++;
+
+        // Read sysname
+        size_t sysname_start = pos;
+        while (pos < line.size() && line[pos] != ' ') pos++;
+        if (pos > sysname_start) {
+            sysname = line.substr(sysname_start, pos - sysname_start);
+        }
+
+        // Skip spaces, then look for julian date (7 digits)
+        while (pos < line.size() && line[pos] == ' ') pos++;
+        // Skip date
+        while (pos < line.size() && isdigit(line[pos])) pos++;
+        while (pos < line.size() && line[pos] == ' ') pos++;
+
+        // Extract timestamp (HH:MM:SS.TH)
+        if (pos + 11 <= line.size() && line[pos + 2] == ':' && line[pos + 5] == ':') {
+            timestamp = line.substr(pos, 11);
+            pos += 11;
+        }
+        while (pos < line.size() && line[pos] == ' ') pos++;
+
+        // Extract jobname
+        size_t job_start = pos;
+        while (pos < line.size() && line[pos] != ' ') pos++;
+        if (pos > job_start) {
+            jobname = line.substr(job_start, pos - job_start);
+        }
+
+        // Skip to message flags and then message text
+        while (pos < line.size() && line[pos] == ' ') pos++;
+        // Skip the message flags field (8 hex digits)
+        while (pos < line.size() && (isxdigit(line[pos]))) pos++;
+        while (pos < line.size() && line[pos] == ' ') pos++;
+
+        // The rest is message text
+        if (pos < line.size()) {
+            msg_text = line.substr(pos);
+        }
+
+        if (msg_text.empty()) continue;
+
+        // Extract message ID from the message text
+        std::string msgid = extract_msgid(msg_text);
 
         ConsoleMessage msg;
-        msg.text = line;
-
-        // Try to extract a message ID
-        std::smatch match;
-        if (std::regex_search(line, match, msgid_re)) {
-            msg.msgid = match[1].str();
-            msg.severity = msg.msgid.back();
-        }
-
-        // Extract timestamp if present (HH:MM:SS pattern)
-        std::regex ts_re("([0-9]{2}:[0-9]{2}:[0-9]{2})");
-        std::smatch ts_match;
-        if (std::regex_search(line, ts_match, ts_re)) {
-            msg.timestamp = ts_match[1].str();
-        }
-
-        if (!msg.msgid.empty()) {
-            messages.push_back(std::move(msg));
-        }
+        msg.timestamp = timestamp;
+        msg.sysname = sysname;
+        msg.jobname = jobname;
+        msg.msgid = msgid;
+        msg.text = msg_text;
+        msg.severity = msgid.empty() ? ' ' : msgid.back();
+        messages.push_back(std::move(msg));
     }
     return messages;
 }
@@ -144,23 +311,36 @@ static std::string run_pcon(const std::string &time_flag, bool json_mode) {
     return output;
 }
 
-// Extract the "content" field from pcon JSON output.
-// pcon JSON structure: { "SYSNAME": { "content": "...", ... }, ... }
-// Simple extraction without a JSON library.
+// Extract the "content" fields from pcon JSON output.
+// pcon JSON: {"data":{"SYSNAME":{"content":"...","content_length":N}},"system_logs":N,...}
+// May have multiple system entries.
 static std::string extract_pcon_content(const std::string &json) {
     std::string all_content;
+
+    // Find all "content":"..." pairs (skip "content_length" keys)
     size_t pos = 0;
-    while ((pos = json.find("\"content\"", pos)) != std::string::npos) {
-        // Find the colon after "content"
-        size_t colon = json.find(':', pos + 9);
+    while (pos < json.size()) {
+        pos = json.find("\"content\"", pos);
+        if (pos == std::string::npos) break;
+
+        // Make sure this is "content" not "content_length"
+        size_t after_key = pos + 9; // length of "content"
+        if (after_key < json.size() && json[after_key] == '_') {
+            // This is "content_length", skip it
+            pos = after_key;
+            continue;
+        }
+
+        // Find the colon
+        size_t colon = json.find(':', after_key);
         if (colon == std::string::npos) break;
 
-        // Skip whitespace, find opening quote
+        // Find opening quote of value
         size_t quote_start = json.find('"', colon + 1);
         if (quote_start == std::string::npos) break;
         quote_start++;
 
-        // Find closing quote (handle escaped quotes)
+        // Find closing quote (handle escaped characters)
         size_t quote_end = quote_start;
         while (quote_end < json.size()) {
             if (json[quote_end] == '\\') {
@@ -173,14 +353,16 @@ static std::string extract_pcon_content(const std::string &json) {
 
         std::string content = json.substr(quote_start, quote_end - quote_start);
 
-        // Unescape \\n back to newlines
+        // Unescape JSON string
         std::string unescaped;
         for (size_t i = 0; i < content.size(); i++) {
             if (content[i] == '\\' && i + 1 < content.size()) {
-                if (content[i + 1] == 'n') { unescaped += '\n'; i++; continue; }
-                if (content[i + 1] == 't') { unescaped += '\t'; i++; continue; }
-                if (content[i + 1] == '"') { unescaped += '"'; i++; continue; }
-                if (content[i + 1] == '\\') { unescaped += '\\'; i++; continue; }
+                char next = content[i + 1];
+                if (next == 'n') { unescaped += '\n'; i++; continue; }
+                if (next == 't') { unescaped += '\t'; i++; continue; }
+                if (next == '"') { unescaped += '"'; i++; continue; }
+                if (next == '\\') { unescaped += '\\'; i++; continue; }
+                if (next == '/') { unescaped += '/'; i++; continue; }
             }
             unescaped += content[i];
         }
@@ -219,7 +401,6 @@ int main(int argc, char ** argv) {
     bool json_output = false;
     bool pcon_mode = false;
     std::string source_type_filter;
-    std::string pcon_flags = "-r";  // default: recent
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--quiet") == 0) {
@@ -243,7 +424,6 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--pcon") == 0) {
             pcon_mode = true;
             arg_idx++;
-            // Collect remaining flags after model and store args for pcon
             break;
         } else {
             break;
@@ -258,7 +438,7 @@ int main(int argc, char ** argv) {
     std::string model_path = argv[arg_idx++];
     std::string store_path = argv[arg_idx++];
 
-    // Determine input: single message or pcon mode
+    // Determine input: single message, pcon mode, or stdin
     std::string raw_input;
 
     if (pcon_mode) {
@@ -298,40 +478,44 @@ int main(int argc, char ** argv) {
     }
 
     // Parse messages
-    auto messages = parse_syslog(raw_input);
+    auto all_messages = parse_syslog(raw_input);
 
     // Filter to interesting messages unless verbose
     std::vector<ConsoleMessage> interesting;
-    if (g_verbose) {
-        interesting = messages;
-    } else {
-        for (auto &m : messages) {
-            if (is_interesting_message(m.msgid)) {
-                interesting.push_back(m);
-            }
+    for (auto &m : all_messages) {
+        if (m.msgid.empty()) continue;
+        if (g_verbose || is_interesting_message(m.msgid)) {
+            interesting.push_back(m);
         }
     }
 
-    // Deduplicate by message ID (only query once per unique msgid)
+    // Deduplicate by message ID — keep the first occurrence, count repeats
     std::vector<ConsoleMessage> unique_msgs;
     {
         std::vector<std::string> seen;
         for (auto &m : interesting) {
-            if (std::find(seen.begin(), seen.end(), m.msgid) == seen.end()) {
+            auto it = std::find(seen.begin(), seen.end(), m.msgid);
+            if (it == seen.end()) {
                 seen.push_back(m.msgid);
                 unique_msgs.push_back(m);
+            } else {
+                // Increment count on the existing entry
+                size_t idx = it - seen.begin();
+                unique_msgs[idx].count++;
             }
         }
     }
 
     if (unique_msgs.empty()) {
-        if (!g_quiet) std::cout << "No interesting messages found." << std::endl;
+        if (!g_quiet) std::cout << "No interesting messages found in "
+                                << all_messages.size() << " total messages." << std::endl;
         return 0;
     }
 
     if (!g_quiet) {
-        std::cerr << "Found " << messages.size() << " messages, "
-                  << unique_msgs.size() << " unique interesting message IDs to look up." << std::endl;
+        std::cerr << "Parsed " << all_messages.size() << " messages, "
+                  << interesting.size() << " interesting, "
+                  << unique_msgs.size() << " unique IDs to look up." << std::endl;
     }
 
     // Initialize llama.cpp
@@ -375,7 +559,7 @@ int main(int argc, char ** argv) {
     for (size_t mi = 0; mi < unique_msgs.size(); mi++) {
         auto &msg = unique_msgs[mi];
 
-        // Build a search query from the message
+        // Build a search query from the message ID and full text
         std::string query_text = msg.msgid + " " + msg.text;
         if (use_prefix) query_text = "search_query: " + query_text;
 
@@ -412,8 +596,11 @@ int main(int argc, char ** argv) {
             std::cout << "  {\n";
             std::cout << "    \"msgid\": \"" << escape_json(msg.msgid) << "\",\n";
             std::cout << "    \"severity\": \"" << msg.severity << "\",\n";
-            std::cout << "    \"message\": \"" << escape_json(msg.text) << "\",\n";
             std::cout << "    \"timestamp\": \"" << escape_json(msg.timestamp) << "\",\n";
+            std::cout << "    \"jobname\": \"" << escape_json(msg.jobname) << "\",\n";
+            std::cout << "    \"system\": \"" << escape_json(msg.sysname) << "\",\n";
+            std::cout << "    \"count\": " << msg.count << ",\n";
+            std::cout << "    \"message\": \"" << escape_json(msg.text) << "\",\n";
             std::cout << "    \"context\": [\n";
             for (size_t i = 0; i < results.size(); i++) {
                 auto &r = results[i];
@@ -426,11 +613,18 @@ int main(int argc, char ** argv) {
             std::cout << "    ]\n";
             std::cout << "  }" << (mi == unique_msgs.size() - 1 ? "" : ",") << "\n";
         } else {
-            std::cout << "=== " << msg.msgid << " ";
-            if (msg.severity == 'A') std::cout << "(ACTION) ";
-            else if (msg.severity == 'E') std::cout << "(ERROR) ";
-            else if (msg.severity == 'W') std::cout << "(WARNING) ";
-            std::cout << "===" << std::endl;
+            // Header with severity badge
+            std::cout << "=== " << msg.msgid;
+            if (msg.severity == 'A') std::cout << " (ACTION)";
+            else if (msg.severity == 'E') std::cout << " (ERROR)";
+            else if (msg.severity == 'W') std::cout << " (WARNING)";
+            if (msg.count > 1) std::cout << " [x" << msg.count << "]";
+            std::cout << " ===" << std::endl;
+
+            // Message details
+            std::cout << "  Time: " << msg.timestamp
+                      << "  Job: " << msg.jobname
+                      << "  System: " << msg.sysname << std::endl;
             std::cout << "  " << msg.text << std::endl;
             std::cout << std::endl;
 
