@@ -5,8 +5,10 @@
 #include <fstream>
 #include <cstring>
 #include <cstdlib>
+#include <unordered_set>
 #include "llama.h"
 #include "common_store.h"
+#include "store_sqlite.h"
 
 namespace fs = std::filesystem;
 
@@ -31,8 +33,8 @@ int main(int argc, char ** argv) {
     bool use_prefix = false;
     int chunk_size = 256;
     int chunk_overlap = 64;
-
     int n_threads = 4;
+    std::string source_type;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
@@ -54,6 +56,9 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--chunk-overlap") == 0 && arg_idx + 1 < argc) {
             chunk_overlap = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--source-type") == 0 && arg_idx + 1 < argc) {
+            source_type = argv[arg_idx + 1];
+            arg_idx += 2;
         } else {
             break;
         }
@@ -61,8 +66,8 @@ int main(int argc, char ** argv) {
 
     if (argc - arg_idx < 3) {
         std::cerr << "Usage: " << argv[0] << " [--quiet] [--prefix] [--include .txt,.md,.cpp]"
-                  << " [--chunk-size N] [--chunk-overlap N] [--threads N]"
-                  << " <model_path> <directory_path> <output_file>" << std::endl;
+                  << " [--chunk-size N] [--chunk-overlap N] [--threads N] [--source-type TYPE]"
+                  << " <model_path> <directory_path> <output.db>" << std::endl;
         return 1;
     }
 
@@ -96,6 +101,16 @@ int main(int argc, char ** argv) {
     const int n_ctx = (int)cparams.n_ctx;
     const int n_embd = llama_model_n_embd(model);
 
+    // Open sqlite-vec store
+    StoreDB store;
+    if (!store_open(store, store_path, n_embd)) {
+        std::cerr << "Error: failed to open store " << store_path << std::endl;
+        return 1;
+    }
+
+    // Get already-indexed files for incremental mode
+    auto indexed_files = store_get_indexed_files(store);
+
     // Tokenize the prefix once if needed
     std::vector<llama_token> prefix_tokens;
     if (use_prefix) {
@@ -113,7 +128,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Phase 1: Scan directory, tokenize, and chunk all files
+    // Phase 1: Scan directory, determine what needs indexing
     if (!g_quiet) {
         std::cout << "Indexing: " << dir_path << " (suffixes: ";
         for (size_t i = 0; i < suffixes.size(); ++i) std::cout << suffixes[i] << (i == suffixes.size() - 1 ? "" : ", ");
@@ -122,9 +137,34 @@ int main(int argc, char ** argv) {
 
     std::vector<TokenizedChunk> chunks;
     int files_scanned = 0;
+    int files_skipped = 0;
+    int files_updated = 0;
+    int files_new = 0;
+
+    // Track which files we see on disk so we can detect deletions
+    std::unordered_set<std::string> seen_files;
 
     for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
         if (!entry.is_regular_file() || !has_suffix(entry.path().string(), suffixes)) continue;
+
+        std::string fname = entry.path().string();
+        int64_t mtime = (int64_t)fs::last_write_time(entry).time_since_epoch().count();
+        seen_files.insert(fname);
+
+        // Check if already indexed and unchanged
+        auto it = indexed_files.find(fname);
+        if (it != indexed_files.end() && it->second == mtime) {
+            files_skipped++;
+            continue;
+        }
+
+        // If it existed before with different mtime, delete old chunks
+        if (it != indexed_files.end()) {
+            store_delete_file(store, fname);
+            files_updated++;
+        } else {
+            files_new++;
+        }
 
         std::ifstream file(entry.path());
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -137,7 +177,7 @@ int main(int argc, char ** argv) {
         // Tokenize raw content (no prefix — prefix is prepended per-chunk)
         auto all_tokens = std::vector<llama_token>(content.size() + 2);
         int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
-                                      !use_prefix, true);  // add BOS only if no prefix (prefix has BOS)
+                                      !use_prefix, true);
         if (n_tokens < 0) {
             all_tokens.resize(-n_tokens);
             n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
@@ -145,7 +185,6 @@ int main(int argc, char ** argv) {
         }
         all_tokens.resize(n_tokens);
 
-        std::string fname = entry.path().string();
         int total_chars = (int)content.size();
         int total_tokens = n_tokens;
 
@@ -154,7 +193,6 @@ int main(int argc, char ** argv) {
         if (step < 1) step = 1;
 
         if (total_tokens <= content_chunk_size) {
-            // File fits in one chunk — no splitting needed
             TokenizedChunk ch;
             ch.filename = fname;
             ch.snippet = content.substr(0, 500);
@@ -171,7 +209,6 @@ int main(int argc, char ** argv) {
                 int end = std::min(start + content_chunk_size, total_tokens);
                 chunk_num++;
 
-                // Estimate character range for snippet
                 int char_start = (total_chars > 0 && total_tokens > 0)
                     ? (int)((long long)start * total_chars / total_tokens) : 0;
                 int char_end = (total_chars > 0 && total_tokens > 0)
@@ -198,12 +235,31 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (!g_quiet) std::cout << "Scanned " << files_scanned << " files -> " << chunks.size()
-                            << " chunks. Encoding..." << std::endl;
+    // Delete chunks for files that no longer exist on disk
+    int files_removed = 0;
+    for (auto &[fname, mt] : indexed_files) {
+        if (seen_files.find(fname) == seen_files.end()) {
+            store_delete_file(store, fname);
+            files_removed++;
+        }
+    }
 
-    // Phase 2: Encode chunks one at a time (avoids multi-sequence graph splits)
-    std::vector<Record> store;
-    store.reserve(chunks.size());
+    if (!g_quiet) {
+        std::cout << "Scanned " << files_scanned << " files -> " << chunks.size() << " chunks to encode." << std::endl;
+        std::cout << "  New: " << files_new << ", Updated: " << files_updated
+                  << ", Removed: " << files_removed << ", Skipped (unchanged): " << files_skipped << std::endl;
+    }
+
+    if (chunks.empty()) {
+        if (!g_quiet) std::cout << "Nothing to encode. Store is up to date." << std::endl;
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 0;
+    }
+
+    // Phase 2: Encode chunks and insert into store
+    store_begin(store);
 
     for (size_t i = 0; i < chunks.size(); ++i) {
         auto & ch = chunks[i];
@@ -231,12 +287,18 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        Record rec;
-        rec.filename = std::move(ch.filename);
-        rec.text = std::move(ch.snippet);
-        rec.embedding.assign(emb, emb + n_embd);
-        normalize_embedding(rec.embedding);
-        store.push_back(std::move(rec));
+        std::vector<float> embedding(emb, emb + n_embd);
+        normalize_embedding(embedding);
+
+        // Extract base filename (strip " [chunk N]" suffix) for mtime lookup
+        std::string base_fname = ch.filename;
+        auto bracket_pos = base_fname.find(" [chunk ");
+        if (bracket_pos != std::string::npos) {
+            base_fname = base_fname.substr(0, bracket_pos);
+        }
+        int64_t mtime = (int64_t)fs::last_write_time(fs::path(base_fname)).time_since_epoch().count();
+
+        store_insert(store, ch.filename, ch.snippet, source_type, mtime, embedding);
 
         if (is_encoder) llama_batch_free(batch);
 
@@ -245,8 +307,10 @@ int main(int argc, char ** argv) {
         }
     }
 
-    save_store(store_path, store);
-    if (!g_quiet) std::cout << "Successfully saved " << store.size() << " records to " << store_path << std::endl;
+    store_commit(store);
+
+    int total = store_count(store);
+    if (!g_quiet) std::cout << "Done. Store has " << total << " total records in " << store_path << std::endl;
 
     llama_free(ctx);
     llama_model_free(model);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(z-vector-search CXX)
+project(z-vector-search C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -31,10 +31,26 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_F
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
 
 # Flexible Header Search
+include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${LLAMA_ROOT}/include)
 include_directories(${LLAMA_ROOT})
 include_directories(${ZOSLIB_ROOT}/include)
 include_directories(${BLIS_ROOT}/include)
+
+# SQLite and sqlite-vec (vendored, compiled as C)
+add_library(sqlite3 STATIC vendor/sqlite3.c)
+target_compile_definitions(sqlite3 PRIVATE
+    SQLITE_CORE
+    SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+    SQLITE_THREADSAFE=1
+    SQLITE_OMIT_LOAD_EXTENSION
+)
+target_include_directories(sqlite3 PUBLIC ${CMAKE_SOURCE_DIR}/vendor)
+
+add_library(sqlite-vec STATIC vendor/sqlite-vec.c)
+target_compile_definitions(sqlite-vec PRIVATE SQLITE_CORE)
+target_include_directories(sqlite-vec PUBLIC ${CMAKE_SOURCE_DIR}/vendor)
+target_link_libraries(sqlite-vec sqlite3)
 
 # Helper function to find a library by exact filename
 function(find_zopen_lib VAR NAME ROOT)
@@ -66,11 +82,13 @@ foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS LIB_MTMD L
     endif()
 endforeach()
 
+set(ALL_LIBS sqlite3 sqlite-vec ${LLAMA_LIBS})
+
 add_executable(z-index index.cpp)
-target_link_libraries(z-index ${LLAMA_LIBS})
+target_link_libraries(z-index ${ALL_LIBS})
 
 add_executable(z-query query.cpp)
-target_link_libraries(z-query ${LLAMA_LIBS})
+target_link_libraries(z-query ${ALL_LIBS})
 
 add_executable(z-vector-search main.cpp)
 target_link_libraries(z-vector-search ${LLAMA_LIBS})
