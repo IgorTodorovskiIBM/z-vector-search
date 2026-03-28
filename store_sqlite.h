@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 
+#define SQLITE_CORE
 #include "vendor/sqlite3.h"
 #include "vendor/sqlite-vec.h"
 
