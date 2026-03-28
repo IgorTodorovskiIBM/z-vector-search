@@ -9,6 +9,7 @@
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
+#include "defaults.h"
 
 static bool g_quiet = false;
 static bool g_verbose = false;
@@ -376,8 +377,11 @@ static std::string extract_pcon_content(const std::string &json) {
 
 static void print_usage(const char *prog) {
     std::cerr << "Usage:\n"
-              << "  " << prog << " [OPTIONS] <model.gguf> <store.db> \"<message>\"\n"
-              << "  " << prog << " [OPTIONS] <model.gguf> <store.db> --pcon [PCON_FLAGS]\n"
+              << "  " << prog << " [OPTIONS] \"<message>\"\n"
+              << "  " << prog << " [OPTIONS] --pcon [PCON_FLAGS]\n"
+              << "  " << prog << " [OPTIONS] [model.gguf] [store.db] \"<message>\"\n"
+              << "\nDefaults: model=" << get_default_model() << "\n"
+              << "          store=" << get_default_store() << "\n"
               << "\nOptions:\n"
               << "  --top-k N          Number of results per message (default: 3)\n"
               << "  --prefix           Use search_query: prefix\n"
@@ -386,9 +390,9 @@ static void print_usage(const char *prog) {
               << "  --verbose          Show all parsed messages, not just interesting ones\n"
               << "  --quiet            Suppress llama.cpp logs\n"
               << "\nPcon flags (when using --pcon mode):\n"
-              << "  --recent / -r      Last 10 minutes (default)\n"
-              << "  --hour / -l        Last hour\n"
-              << "  --day / -d         Last day\n"
+              << "  -r                 Last 10 minutes (default)\n"
+              << "  -l                 Last hour\n"
+              << "  -d                 Last day\n"
               << "  -t N               Last N minutes\n"
               << "  -S SYSNAME         Specific system\n"
               << std::endl;
@@ -430,13 +434,37 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (argc - arg_idx < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
+    // In pcon mode, we need 0+ positional args (model/store optional, pcon flags after --pcon)
+    // In message mode, we need at least 1 positional arg (the message, or model+store+message)
+    // In stdin mode, we need 0 positional args
+    std::string model_path = get_default_model();
+    std::string store_path = get_default_store();
 
-    std::string model_path = argv[arg_idx++];
-    std::string store_path = argv[arg_idx++];
+    // Peek at remaining args to figure out what's model/store vs message/pcon-flags
+    // Heuristic: if an arg ends in .gguf it's the model, if it ends in .db it's the store
+    if (!pcon_mode && arg_idx < argc) {
+        std::vector<std::string> positional;
+        int temp = arg_idx;
+        while (temp < argc) positional.push_back(argv[temp++]);
+
+        if (positional.size() >= 3) {
+            model_path = positional[0];
+            store_path = positional[1];
+            arg_idx += 2;
+        } else if (positional.size() == 2) {
+            // Could be "model query" or "store query" — check extensions
+            std::string &first = positional[0];
+            if (first.size() > 5 && first.substr(first.size() - 5) == ".gguf") {
+                model_path = first;
+                arg_idx++;
+            } else if (first.size() > 3 && first.substr(first.size() - 3) == ".db") {
+                store_path = first;
+                arg_idx++;
+            }
+            // else: both are non-path args, first is the message
+        }
+        // 1 arg: it's the message, use defaults
+    }
 
     // Determine input: single message, pcon mode, or stdin
     std::string raw_input;

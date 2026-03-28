@@ -10,6 +10,7 @@
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
+#include "defaults.h"
 
 static bool g_quiet = false;
 
@@ -283,10 +284,12 @@ static void set_high_water_mark(StoreDB &store, const std::string &mark, int n_e
 
 static void print_usage(const char *prog) {
     std::cerr << "Usage:\n"
-              << "  " << prog << " [OPTIONS] <model.gguf> <store.db> [PCON_FLAGS]\n"
+              << "  " << prog << " [OPTIONS] [model.gguf] [store.db] [PCON_FLAGS]\n"
               << "\nIngests z/OS operator console output into the vector store.\n"
               << "Runs pcon to retrieve SYSLOG, groups messages into time-windowed\n"
               << "chunks, embeds them, and inserts with source_type='operlog'.\n"
+              << "\n  Defaults: model=" << get_default_model() << "\n"
+              << "            store=" << get_default_store() << "\n"
               << "\nOptions:\n"
               << "  --window N         Minutes per chunk (default: 5)\n"
               << "  --threads N        Encoding threads (default: 4)\n"
@@ -328,21 +331,42 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (argc - arg_idx < 2) {
-        print_usage(argv[0]);
-        return 1;
+    // Resolve positional args: model and store are optional, remaining are pcon flags.
+    // Heuristic: .gguf -> model, .db -> store, anything starting with '-' -> pcon flag
+    std::string model_path = get_default_model();
+    std::string store_path = get_default_store();
+    std::string pcon_flags;
+
+    while (arg_idx < argc) {
+        std::string a = argv[arg_idx];
+        if (a[0] == '-') {
+            // This and everything after are pcon flags
+            break;
+        }
+        // Check extension
+        if (a.size() > 5 && a.substr(a.size() - 5) == ".gguf") {
+            model_path = a;
+        } else if (a.size() > 3 && a.substr(a.size() - 3) == ".db") {
+            store_path = a;
+        } else {
+            // Unknown positional — treat as model if first, store if second
+            if (model_path == get_default_model()) {
+                model_path = a;
+            } else if (store_path == get_default_store()) {
+                store_path = a;
+            }
+        }
+        arg_idx++;
     }
 
-    std::string model_path = argv[arg_idx++];
-    std::string store_path = argv[arg_idx++];
-
     // Remaining args are pcon flags
-    std::string pcon_flags;
     while (arg_idx < argc) {
         if (!pcon_flags.empty()) pcon_flags += " ";
         pcon_flags += argv[arg_idx++];
     }
     if (pcon_flags.empty()) pcon_flags = "-r";
+
+    ensure_default_dir();
 
     llama_log_set(llama_log_callback, NULL);
 

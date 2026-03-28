@@ -7,6 +7,7 @@
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
+#include "defaults.h"
 
 static bool g_quiet = false;
 
@@ -73,17 +74,34 @@ int main(int argc, char ** argv) {
         arg_idx++;
     }
 
-    if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--json] [--quiet] [--prefix] [--top-k N] [--source-type TYPE]"
-                  << " <model_path> <store.db> <query>" << std::endl;
+    if (argc - arg_idx < 1) {
+        std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] [store.db] <query>\n"
+                  << "  Defaults: model=" << get_default_model() << "\n"
+                  << "            store=" << get_default_store() << std::endl;
         return 1;
     }
 
     llama_log_set(llama_log_callback, NULL);
 
-    std::string model_path = argv[arg_idx++];
-    std::string store_path = argv[arg_idx++];
-    std::string query = argv[arg_idx++];
+    // Resolve args: supports 1, 2, or 3 positional args
+    //   1 arg:  query (use default model + store)
+    //   2 args: store query (use default model)
+    //   3 args: model store query
+    std::string model_path, store_path, query;
+    int remaining = argc - arg_idx;
+    if (remaining >= 3) {
+        model_path = argv[arg_idx++];
+        store_path = argv[arg_idx++];
+        query = argv[arg_idx++];
+    } else if (remaining == 2) {
+        model_path = get_default_model();
+        store_path = argv[arg_idx++];
+        query = argv[arg_idx++];
+    } else {
+        model_path = get_default_model();
+        store_path = get_default_store();
+        query = argv[arg_idx++];
+    }
 
     // Initialize llama.cpp for query embedding
     llama_backend_init();

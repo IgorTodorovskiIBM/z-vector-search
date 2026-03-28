@@ -9,6 +9,7 @@
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
+#include "defaults.h"
 
 namespace fs = std::filesystem;
 
@@ -64,18 +65,35 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (argc - arg_idx < 3) {
-        std::cerr << "Usage: " << argv[0] << " [--quiet] [--prefix] [--include .txt,.md,.cpp]"
-                  << " [--chunk-size N] [--chunk-overlap N] [--threads N] [--source-type TYPE]"
-                  << " <model_path> <directory_path> <output.db>" << std::endl;
+    if (argc - arg_idx < 1) {
+        std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <directory_path> [store.db]\n"
+                  << "  Defaults: model=" << get_default_model() << "\n"
+                  << "            store=" << get_default_store() << std::endl;
         return 1;
     }
 
     llama_log_set(llama_log_callback, NULL);
 
-    std::string model_path = argv[arg_idx++];
-    std::string dir_path = argv[arg_idx++];
-    std::string store_path = argv[arg_idx++];
+    // Resolve args: supports 1, 2, or 3 positional args
+    //   1 arg:  directory (use default model + store)
+    //   2 args: model directory (use default store)
+    //   3 args: model directory store
+    std::string model_path, dir_path, store_path;
+    int remaining = argc - arg_idx;
+    if (remaining >= 3) {
+        model_path = argv[arg_idx++];
+        dir_path = argv[arg_idx++];
+        store_path = argv[arg_idx++];
+    } else if (remaining == 2) {
+        model_path = argv[arg_idx++];
+        dir_path = argv[arg_idx++];
+        store_path = get_default_store();
+    } else {
+        model_path = get_default_model();
+        dir_path = argv[arg_idx++];
+        store_path = get_default_store();
+    }
+    ensure_default_dir();
 
     llama_backend_init();
     auto mparams = llama_model_default_params();

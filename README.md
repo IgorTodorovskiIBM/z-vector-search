@@ -148,18 +148,23 @@ The `z-ingest-console` tool indexes SYSLOG history into the vector store so that
 
 **Ingest the last day of console output:**
 ```bash
-./z-ingest-console model.gguf store.db -d
+./z-ingest-console -d
 ```
 
 **Ingest the last week, 10-minute windows:**
 ```bash
-./z-ingest-console --window 10 model.gguf store.db -w
+./z-ingest-console --window 10 -w
+```
+
+**With explicit model/store paths:**
+```bash
+./z-ingest-console model.gguf store.db -d
 ```
 
 **Run periodically via cron (incremental — skips already-ingested windows):**
 ```bash
 # Every hour, ingest the last hour of console
-0 * * * * /path/to/z-ingest-console --quiet model.gguf store.db -l
+0 * * * * /path/to/z-ingest-console --quiet -l
 ```
 
 **Options:**
@@ -175,7 +180,76 @@ Pcon flags (`-r`, `-l`, `-d`, `-w`, `-t N`, `-S SYSNAME`, `-A`) are passed throu
 
 The tool tracks a high-water mark in the store, so running it repeatedly only indexes new data. Over time, the store builds up operational history that z-console uses to show "this message last appeared on DATE, and here's what happened next."
 
-### 5. One-Shot Mode
+### 5. Background Daemon (z-console-daemon)
+
+The `z-console-daemon.sh` script runs `z-ingest-console` in a loop, continuously building up operational history in the vector store. Once running, you can query the store anytime with `z-query` or `z-console`.
+
+**Start the daemon (indexes every 5 minutes):**
+```bash
+./z-console-daemon.sh &
+```
+
+**Custom interval and time window:**
+```bash
+./z-console-daemon.sh --interval 600 --window 10 &
+```
+
+**Run once and exit (for cron):**
+```bash
+./z-console-daemon.sh --once --pcon-flags "-l"
+```
+
+**With PID file for service management:**
+```bash
+./z-console-daemon.sh --pidfile /tmp/z-console-daemon.pid &
+# Later: kill $(cat /tmp/z-console-daemon.pid)
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--interval N` | Seconds between ingest runs (default: 300) |
+| `--window N` | Minutes per chunk (default: 5) |
+| `--model PATH` | Path to model file |
+| `--store PATH` | Path to store database |
+| `--prefix` | Use `search_document:` prefix |
+| `--pcon-flags F` | Extra pcon flags (default: `-r`) |
+| `--once` | Run once and exit |
+| `--pidfile PATH` | Write PID for service management |
+
+### 6. Default Paths
+
+All tools default to `$HOME/.z-vector-search/` for model and store paths:
+
+| File | Default Location |
+|------|-----------------|
+| Model | `$HOME/.z-vector-search/model.gguf` |
+| Store | `$HOME/.z-vector-search/store.db` |
+
+This means most commands can be run with minimal arguments:
+
+```bash
+# Setup: copy your model to the default location
+cp nomic-embed-text-v1.5.Q4_K_M.gguf ~/.z-vector-search/model.gguf
+
+# Index a directory (uses default model and store)
+./z-index ./my_docs
+
+# Query (uses default model and store)
+./z-query "How do I build on z/OS?"
+
+# Console RAG (uses defaults)
+./z-console --pcon -r
+
+# Ingest console history (uses defaults)
+./z-ingest-console -d
+
+# Start background daemon (uses defaults)
+./z-console-daemon.sh &
+```
+
+### 7. One-Shot Mode
 
 The `z-vector-search` tool indexes and queries in a single run (no persistent store):
 
