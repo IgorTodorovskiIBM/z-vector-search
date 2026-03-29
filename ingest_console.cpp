@@ -633,7 +633,7 @@ int main(int argc, char ** argv) {
         meta.julian_date = chunk.julian_date;
         meta.msg_count = chunk.msg_count;
 
-        store_insert_full(store, chunk_name, chunk.snippet, "operlog", 0, embedding, meta);
+        store_insert_full(store, chunk_name, chunk.snippet, "operlog", 0, embedding, meta, chunk.text);
         inserted++;
 
         if (is_encoder) llama_batch_free(batch);

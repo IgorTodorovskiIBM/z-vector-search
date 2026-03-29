@@ -60,6 +60,7 @@ inline bool store_migrate(sqlite3 *db) {
         {"ts_end",      "TEXT DEFAULT ''"},
         {"julian_date", "TEXT DEFAULT ''"},
         {"msg_count",   "INTEGER DEFAULT 0"},
+        {"full_text",   "TEXT DEFAULT ''"},
         {nullptr, nullptr}
     };
 
@@ -152,6 +153,29 @@ inline bool store_open(StoreDB &store, const std::string &path, int n_embd) {
     return true;
 }
 
+// Lightweight open for keyword/timeline queries that don't need the embedding model.
+// Skips vec_chunks creation (which requires n_embd), but still registers sqlite-vec
+// so the JOIN in store_query() works if the table already exists.
+inline bool store_open_readonly(StoreDB &store, const std::string &path) {
+    store.n_embd = 0;
+
+    int rc = sqlite3_open_v2(path.c_str(), &store.db, SQLITE_OPEN_READWRITE, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "sqlite3_open: " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+
+    char *vec_err = nullptr;
+    sqlite3_vec_init(store.db, &vec_err, nullptr);
+    if (vec_err) sqlite3_free(vec_err);
+
+    sqlite3_exec(store.db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(store.db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+
+    store_migrate(store.db);
+    return true;
+}
+
 // Get a map of base_filename -> mtime for all indexed files.
 // Strips " [chunk N]" suffixes so the caller can compare against filesystem paths.
 inline std::unordered_map<std::string, int64_t> store_get_indexed_files(StoreDB &store) {
@@ -217,11 +241,12 @@ inline void store_delete_file(StoreDB &store, const std::string &filename) {
 inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
                                  const std::string &snippet, const std::string &source_type,
                                  int64_t mtime, const std::vector<float> &embedding,
-                                 const ChunkMeta &meta) {
+                                 const ChunkMeta &meta,
+                                 const std::string &full_text = "") {
     const char *sql_meta =
         "INSERT INTO chunks(filename, snippet, source_type, mtime, "
-        "msgid, severity, jobname, sysname, ts_start, ts_end, julian_date, msg_count) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?);";
+        "msgid, severity, jobname, sysname, ts_start, ts_end, julian_date, msg_count, full_text) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(store.db, sql_meta, -1, &stmt, nullptr) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, filename.c_str(), -1, SQLITE_STATIC);
@@ -237,6 +262,7 @@ inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
     sqlite3_bind_text(stmt, 10, meta.ts_end.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 11, meta.julian_date.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 12, meta.msg_count);
+    sqlite3_bind_text(stmt, 13, full_text.c_str(), -1, SQLITE_STATIC);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::cerr << "insert chunks: " << sqlite3_errmsg(store.db) << std::endl;
         sqlite3_finalize(stmt);
@@ -285,6 +311,7 @@ struct QueryResult {
     std::string filename;
     std::string snippet;
     std::string source_type;
+    std::string full_text;    // complete chunk text (if stored)
     // Structured fields (populated for operlog chunks)
     std::string msgid;
     std::string severity;
@@ -310,7 +337,7 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
     std::string sql =
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
         "c.msgid, c.severity, c.jobname, c.sysname, c.ts_start, c.ts_end, "
-        "c.julian_date, c.msg_count "
+        "c.julian_date, c.msg_count, c.full_text "
         "FROM vec_chunks v "
         "INNER JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? "
@@ -353,6 +380,7 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         qr.ts_end      = col_str(stmt, 10);
         qr.julian_date = col_str(stmt, 11);
         qr.msg_count   = sqlite3_column_int(stmt, 12);
+        qr.full_text   = col_str(stmt, 13);
         results.push_back(std::move(qr));
 
         if ((int)results.size() >= top_k) break;
@@ -394,7 +422,7 @@ inline std::vector<QueryResult> store_keyword_query(StoreDB &store,
     // Build WHERE clauses dynamically
     std::string sql = "SELECT id, filename, snippet, source_type, "
                       "msgid, severity, jobname, sysname, ts_start, ts_end, "
-                      "julian_date, msg_count FROM chunks WHERE 1=1";
+                      "julian_date, msg_count, full_text FROM chunks WHERE 1=1";
     std::vector<std::string> binds;
 
     if (!kq.msgid_pattern.empty()) {
@@ -479,6 +507,7 @@ inline std::vector<QueryResult> store_keyword_query(StoreDB &store,
         qr.ts_end      = col_str(stmt, 9);
         qr.julian_date = col_str(stmt, 10);
         qr.msg_count   = sqlite3_column_int(stmt, 11);
+        qr.full_text   = col_str(stmt, 12);
         results.push_back(std::move(qr));
     }
     sqlite3_finalize(stmt);
@@ -551,6 +580,7 @@ inline std::vector<QueryResult> store_timeline_query(StoreDB &store,
         qr.ts_end      = col_str(stmt, 9);
         qr.julian_date = col_str(stmt, 10);
         qr.msg_count   = sqlite3_column_int(stmt, 11);
+        qr.full_text   = col_str(stmt, 12);
         results.push_back(std::move(qr));
     }
     sqlite3_finalize(stmt);

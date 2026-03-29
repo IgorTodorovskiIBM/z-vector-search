@@ -181,20 +181,11 @@ int main(int argc, char ** argv) {
     // --- Determine search mode ---
     // Timeline mode is special: pure SQL, no embedding needed
     if (!opt_timeline.empty()) {
-        // Open store without loading model (we just need n_embd for store_open)
-        // Use a dummy n_embd — store_open will work with existing DB
         StoreDB store;
-        // We need n_embd to open the store. Read it from the existing vec table.
-        // Open with n_embd=0 first to get the DB handle, then query.
-        int rc = sqlite3_open(store_path.c_str(), &store.db);
-        if (rc != SQLITE_OK) {
+        if (!store_open_readonly(store, store_path)) {
             std::cerr << "Error: failed to open store " << store_path << std::endl;
             return 1;
         }
-        char *vec_err = nullptr;
-        sqlite3_vec_init(store.db, &vec_err, nullptr);
-        if (vec_err) sqlite3_free(vec_err);
-        store_migrate(store.db);
 
         auto results = store_timeline_query(store, opt_date, opt_timeline,
                                             opt_timeline_window, opt_sys);
@@ -250,15 +241,10 @@ int main(int argc, char ** argv) {
     // --- Pure keyword mode: no model needed ---
     if (pq.mode == SEARCH_KEYWORD) {
         StoreDB store;
-        int rc = sqlite3_open(store_path.c_str(), &store.db);
-        if (rc != SQLITE_OK) {
+        if (!store_open_readonly(store, store_path)) {
             std::cerr << "Error: failed to open store " << store_path << std::endl;
             return 1;
         }
-        char *vec_err = nullptr;
-        sqlite3_vec_init(store.db, &vec_err, nullptr);
-        if (vec_err) sqlite3_free(vec_err);
-        store_migrate(store.db);
 
         auto results = store_keyword_query(store, pq.kw, top_k);
         int total = store_count(store);

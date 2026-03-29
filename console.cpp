@@ -11,6 +11,7 @@
 #include "store_sqlite.h"
 #include "defaults.h"
 #include "msg_filter.h"
+#include "hybrid_search.h"
 
 static bool g_quiet = false;
 static bool g_verbose = false;
@@ -612,7 +613,28 @@ int main(int argc, char ** argv) {
         std::vector<float> query_vec(q_emb, q_emb + n_embd);
         normalize_embedding(query_vec);
 
-        auto results = store_query(store, query_vec, top_k, source_type_filter);
+        // Two-phase hybrid lookup:
+        // 1. Keyword search on msgid — finds exact documentation and past occurrences
+        // 2. Semantic search on full message text — finds broader context
+        std::vector<QueryResult> kw_results;
+        if (!msg.msgid.empty()) {
+            KeywordQuery kq;
+            kq.msgid_pattern = msg.msgid;
+            if (!source_type_filter.empty()) kq.source_type = source_type_filter;
+            kw_results = store_keyword_query(store, kq, top_k);
+        }
+
+        auto sem_results = store_query(store, query_vec, top_k, source_type_filter);
+
+        // Merge via RRF if we have both, otherwise use whichever has results
+        std::vector<QueryResult> results;
+        if (!kw_results.empty() && !sem_results.empty()) {
+            results = rrf_merge(kw_results, sem_results, top_k);
+        } else if (!kw_results.empty()) {
+            results = kw_results;
+        } else {
+            results = sem_results;
+        }
 
         if (json_output) {
             std::cout << "  {\n";
@@ -628,9 +650,14 @@ int main(int argc, char ** argv) {
                 auto &r = results[i];
                 std::cout << "      {\n";
                 std::cout << "        \"distance\": " << r.distance << ",\n";
+                std::cout << "        \"source_type\": \"" << escape_json(r.source_type) << "\",\n";
                 std::cout << "        \"filename\": \"" << escape_json(r.filename) << "\",\n";
-                std::cout << "        \"snippet\": \"" << escape_json(r.snippet) << "\"\n";
-                std::cout << "      }" << (i == results.size() - 1 ? "" : ",") << "\n";
+                std::cout << "        \"snippet\": \"" << escape_json(r.snippet) << "\"";
+                if (!r.msgid.empty())
+                    std::cout << ",\n        \"msgid\": \"" << escape_json(r.msgid) << "\"";
+                if (!r.ts_start.empty())
+                    std::cout << ",\n        \"ts_start\": \"" << escape_json(r.ts_start) << "\"";
+                std::cout << "\n      }" << (i == results.size() - 1 ? "" : ",") << "\n";
             }
             std::cout << "    ]\n";
             std::cout << "  }" << (mi == unique_msgs.size() - 1 ? "" : ",") << "\n";
@@ -656,8 +683,12 @@ int main(int argc, char ** argv) {
                 std::cout << "  Related context:" << std::endl;
                 for (size_t i = 0; i < results.size(); i++) {
                     auto &r = results[i];
-                    std::cout << "  [" << i + 1 << "] " << r.filename
-                              << " (distance: " << r.distance << ")" << std::endl;
+                    std::cout << "  [" << i + 1 << "]";
+                    if (!r.source_type.empty()) std::cout << " [" << r.source_type << "]";
+                    std::cout << " " << r.filename;
+                    if (r.distance > 0) std::cout << " (dist: " << r.distance << ")";
+                    if (!r.ts_start.empty()) std::cout << " " << r.ts_start;
+                    std::cout << std::endl;
                     std::cout << "      " << r.snippet << std::endl;
                 }
             }

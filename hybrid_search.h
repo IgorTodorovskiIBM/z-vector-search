@@ -184,11 +184,13 @@ static ParsedQuery parse_query(const std::string &query) {
         }
     }
 
-    // All uppercase, short, no spaces — try as text search on snippet
+    // Short all-uppercase single token: could be an abend code (S0C7, U4038),
+    // a subsystem name (CICS, DB2), or an abbreviated search term.
+    // Use hybrid: keyword search on snippet + semantic for broader context.
     if (is_all_upper(trimmed) && trimmed.size() <= 20 && trimmed.find(' ') == std::string::npos) {
         pq.kw.text_pattern = trimmed;
-        pq.mode = SEARCH_KEYWORD;
-        pq.text.clear();
+        pq.text = trimmed;  // also use as semantic query
+        pq.mode = SEARCH_HYBRID;
         return pq;
     }
 
