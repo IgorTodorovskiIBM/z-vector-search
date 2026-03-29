@@ -1,0 +1,68 @@
+DFH2206 date time applid tranid TRANSACTION tranid HAS ABNORMALLY TERMINATED WITH ABEND abcode.
+
+Explanation: A CICS transaction terminated abnormally. The abend code identifies the cause:
+  ASRA: Program check (equivalent to system S0Cx abends)
+  AICA: Runaway task — the transaction exceeded the maximum CPU time
+  AEY9: Remote system not available (ISC/MRO failure)
+  AKCS: Storage violation detected by CICS storage manager
+  ATNI: Task terminated by operator CEMT SET TASK PURGE
+
+System Action: CICS transaction backout occurs. If Dynamic Transaction Backout (DTB) is active, all recoverable resources are backed out to the last sync point.
+
+Operator Response: Check the CICS system log for additional diagnostic information. For ASRA abends, a transaction dump will be produced. For AICA abends, check if the task is in a loop and consider increasing the ICVTSD value if the transaction is legitimately long-running.
+
+DFH0601I date time applid CICS IS BEING QUIESCED BY userid
+
+Explanation: A shutdown of the CICS region has been initiated by the specified user.
+
+System Action: CICS begins orderly shutdown. New transactions are rejected, in-flight transactions are allowed to complete (or are abended after the shutdown interval expires).
+
+Operator Response: Monitor the shutdown progress. If the shutdown hangs, use CEMT PERFORM SHUTDOWN IMMEDIATE as a last resort.
+
+DSN0001I subsys DSN0001I - DSNMSTR ADDRESS SPACE INITIALIZATION COMPLETE
+
+Explanation: The DB2 subsystem master address space has completed initialization and is ready to accept connections.
+
+System Action: DB2 is available for use.
+
+Operator Response: None required. This is informational.
+
+DSNT500I subsys DSNT500I - DSNTIINT DB2 SUBSYSTEM subsys START UP IS COMPLETE
+
+Explanation: DB2 startup is fully complete. All databases and resources are available.
+
+System Action: DB2 begins accepting application connections and SQL requests.
+
+Operator Response: None required. Verify that applications can connect.
+
+DSNT501I subsys DSNT501I - BUFFERPOOL bpname IS ACTIVATED, SIZE = nnnn
+
+Explanation: The specified buffer pool has been activated with the indicated number of buffers.
+
+System Action: The buffer pool is available for use by DB2.
+
+Operator Response: Verify the buffer pool size is appropriate for the workload. Undersized buffer pools cause excessive I/O.
+
+DSN3002I subsys DSN3002I - DATABASE dbname STARTED, MEMBER membername
+
+Explanation: The specified DB2 database (or tablespace) has been started and is available for access.
+
+System Action: Applications can now access the database.
+
+Operator Response: None required.
+
+CSQ3104E csectname QUEUE MANAGER qmgr CHANNEL INITIATOR HAS STOPPED
+
+Explanation: The MQ channel initiator for the specified queue manager has stopped. This may be due to an operator command, an error, or a resource shortage.
+
+System Action: All channels managed by the channel initiator are stopped. Messages cannot be sent to or received from remote queue managers.
+
+Operator Response: Check for preceding error messages that indicate why the channel initiator stopped. Restart it using START CHINIT. If it fails to start, check for resource problems (storage, coupling facility).
+
+CSQ9999E csectname csect-text
+
+Explanation: An unexpected error occurred in the specified CSECT of IBM MQ. This is typically an internal error that requires IBM service.
+
+System Action: Processing may continue with reduced function, or the queue manager may terminate.
+
+Operator Response: Collect diagnostic information (SYSUDUMP, error log entries, MQ trace). Contact IBM support with the CSECT name and error text.

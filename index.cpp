@@ -3,6 +3,7 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <cstring>
 #include <cstdlib>
 #include <unordered_set>
@@ -25,13 +26,94 @@ void llama_log_callback(enum ggml_log_level level, const char * text, void * use
 struct TokenizedChunk {
     std::string filename;
     std::string snippet;
+    std::string full_text;       // complete text for full_text column
+    std::string msgid;           // extracted msgid (for --ibm-messages mode)
     std::vector<llama_token> tokens;
 };
+
+// Extract a message ID at the start of a line (same pattern as console parsers).
+// Returns the msgid or empty string.
+static std::string extract_leading_msgid(const std::string &line) {
+    size_t i = 0;
+    size_t len = line.size();
+    // Skip leading whitespace
+    while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= len) return "";
+
+    size_t start = i;
+    // Alpha prefix (including $#@)
+    while (i < len && (isupper(line[i]) || line[i] == '$' || line[i] == '#' || line[i] == '@')) i++;
+    size_t alpha_len = i - start;
+    if (alpha_len < 2 || alpha_len > 8) return "";
+
+    // Digits
+    size_t dstart = i;
+    while (i < len && isdigit(line[i])) i++;
+    size_t digit_len = i - dstart;
+    if (digit_len < 1 || digit_len > 5) return "";
+
+    // Optional severity letter
+    if (i < len && isupper(line[i])) {
+        char sev = line[i];
+        if (sev == 'I' || sev == 'E' || sev == 'W' || sev == 'A' ||
+            sev == 'S' || sev == 'D' || sev == 'X') {
+            i++;
+        }
+    }
+
+    // Must be followed by space, tab, newline, or end of string
+    if (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n') return "";
+
+    return line.substr(start, i - start);
+}
+
+// Split a file into chunks based on IBM message ID boundaries.
+// Each chunk contains one message entry (msgid + explanation + response).
+static std::vector<TokenizedChunk> split_ibm_messages(const std::string &content,
+                                                       const std::string &filename) {
+    std::vector<TokenizedChunk> result;
+    std::istringstream stream(content);
+    std::string line;
+
+    std::string current_msgid;
+    std::string current_text;
+
+    auto flush = [&]() {
+        if (current_msgid.empty() || current_text.empty()) return;
+        // Trim trailing whitespace
+        while (!current_text.empty() &&
+               (current_text.back() == '\n' || current_text.back() == ' '))
+            current_text.pop_back();
+
+        TokenizedChunk ch;
+        ch.filename = filename + " [" + current_msgid + "]";
+        ch.snippet = current_text.substr(0, 500);
+        ch.full_text = current_text;
+        ch.msgid = current_msgid;
+        // tokens will be filled later
+        result.push_back(std::move(ch));
+    };
+
+    while (std::getline(stream, line)) {
+        std::string msgid = extract_leading_msgid(line);
+        if (!msgid.empty()) {
+            flush();
+            current_msgid = msgid;
+            current_text = line + "\n";
+        } else {
+            current_text += line + "\n";
+        }
+    }
+    flush();
+
+    return result;
+}
 
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
     bool use_prefix = false;
+    bool ibm_messages = false;
     int chunk_size = 256;
     int chunk_overlap = 64;
     int n_threads = 4;
@@ -60,6 +142,10 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--source-type") == 0 && arg_idx + 1 < argc) {
             source_type = argv[arg_idx + 1];
             arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--ibm-messages") == 0) {
+            ibm_messages = true;
+            if (source_type.empty()) source_type = "ibm_doc";
+            arg_idx++;
         } else {
             break;
         }
@@ -68,7 +154,17 @@ int main(int argc, char ** argv) {
     if (argc - arg_idx < 1) {
         std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <directory_path> [store.db]\n"
                   << "  Defaults: model=" << get_default_model() << "\n"
-                  << "            store=" << get_default_store() << std::endl;
+                  << "            store=" << get_default_store() << "\n"
+                  << "\n  Options:\n"
+                  << "    --ibm-messages        Parse files as IBM message manuals (one chunk per msgid)\n"
+                  << "    --source-type TYPE     Tag chunks with source type (default: ibm_doc for --ibm-messages)\n"
+                  << "    --include .txt,.md     File extensions to index\n"
+                  << "    --chunk-size N         Tokens per chunk (default: 256)\n"
+                  << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
+                  << "    --prefix               Add search_document: prefix\n"
+                  << "    --threads N            Encoding threads (default: 4)\n"
+                  << "    --quiet                Suppress progress output\n"
+                  << std::endl;
         return 1;
     }
 
@@ -192,64 +288,93 @@ int main(int argc, char ** argv) {
         }
         files_scanned++;
 
-        // Tokenize raw content (no prefix — prefix is prepended per-chunk)
-        auto all_tokens = std::vector<llama_token>(content.size() + 2);
-        int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
-                                      !use_prefix, true);
-        if (n_tokens < 0) {
-            all_tokens.resize(-n_tokens);
-            n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
-                                      !use_prefix, true);
-        }
-        all_tokens.resize(n_tokens);
-
-        int total_chars = (int)content.size();
-        int total_tokens = n_tokens;
-
-        // Split into chunks
-        int step = content_chunk_size - chunk_overlap;
-        if (step < 1) step = 1;
-
-        if (total_tokens <= content_chunk_size) {
-            TokenizedChunk ch;
-            ch.filename = fname;
-            ch.snippet = content.substr(0, 500);
-            if (use_prefix) {
-                ch.tokens = prefix_tokens;
-                ch.tokens.insert(ch.tokens.end(), all_tokens.begin(), all_tokens.end());
-            } else {
-                ch.tokens = std::move(all_tokens);
+        if (ibm_messages) {
+            // IBM message mode: split on message ID boundaries
+            auto msg_chunks = split_ibm_messages(content, fname);
+            if (!g_quiet && !msg_chunks.empty()) {
+                std::cout << "  - " << fname << ": " << msg_chunks.size() << " messages" << std::endl;
             }
-            chunks.push_back(std::move(ch));
-        } else {
-            int chunk_num = 0;
-            for (int start = 0; start < total_tokens; start += step) {
-                int end = std::min(start + content_chunk_size, total_tokens);
-                chunk_num++;
-
-                int char_start = (total_chars > 0 && total_tokens > 0)
-                    ? (int)((long long)start * total_chars / total_tokens) : 0;
-                int char_end = (total_chars > 0 && total_tokens > 0)
-                    ? (int)((long long)end * total_chars / total_tokens) : total_chars;
-                char_start = std::max(0, std::min(char_start, total_chars));
-                char_end = std::max(char_start, std::min(char_end, total_chars));
-
-                TokenizedChunk ch;
-                ch.filename = fname + " [chunk " + std::to_string(chunk_num) + "]";
-                ch.snippet = content.substr(char_start, std::min(500, char_end - char_start));
-
+            // Tokenize each message chunk
+            for (auto &ch : msg_chunks) {
+                std::string &text = ch.full_text;
+                auto toks = std::vector<llama_token>(text.size() + 2);
+                int n = llama_tokenize(vocab, text.c_str(), text.size(),
+                                       toks.data(), toks.size(), !use_prefix, true);
+                if (n < 0) {
+                    toks.resize(-n);
+                    n = llama_tokenize(vocab, text.c_str(), text.size(),
+                                       toks.data(), toks.size(), !use_prefix, true);
+                }
+                toks.resize(n);
                 if (use_prefix) {
                     ch.tokens = prefix_tokens;
-                    ch.tokens.insert(ch.tokens.end(), all_tokens.begin() + start, all_tokens.begin() + end);
+                    ch.tokens.insert(ch.tokens.end(), toks.begin(), toks.end());
                 } else {
-                    ch.tokens.assign(all_tokens.begin() + start, all_tokens.begin() + end);
+                    ch.tokens = std::move(toks);
                 }
                 chunks.push_back(std::move(ch));
-
-                if (end >= total_tokens) break;
             }
-            if (!g_quiet) std::cout << "  - " << fname << ": " << total_tokens
-                                    << " tokens -> " << chunk_num << " chunks" << std::endl;
+        } else {
+            // Standard mode: fixed-size token chunking
+            auto all_tokens = std::vector<llama_token>(content.size() + 2);
+            int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
+                                          !use_prefix, true);
+            if (n_tokens < 0) {
+                all_tokens.resize(-n_tokens);
+                n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
+                                          !use_prefix, true);
+            }
+            all_tokens.resize(n_tokens);
+
+            int total_chars = (int)content.size();
+            int total_tokens = n_tokens;
+
+            int step = content_chunk_size - chunk_overlap;
+            if (step < 1) step = 1;
+
+            if (total_tokens <= content_chunk_size) {
+                TokenizedChunk ch;
+                ch.filename = fname;
+                ch.snippet = content.substr(0, 500);
+                ch.full_text = content;
+                if (use_prefix) {
+                    ch.tokens = prefix_tokens;
+                    ch.tokens.insert(ch.tokens.end(), all_tokens.begin(), all_tokens.end());
+                } else {
+                    ch.tokens = std::move(all_tokens);
+                }
+                chunks.push_back(std::move(ch));
+            } else {
+                int chunk_num = 0;
+                for (int start = 0; start < total_tokens; start += step) {
+                    int end = std::min(start + content_chunk_size, total_tokens);
+                    chunk_num++;
+
+                    int char_start = (total_chars > 0 && total_tokens > 0)
+                        ? (int)((long long)start * total_chars / total_tokens) : 0;
+                    int char_end = (total_chars > 0 && total_tokens > 0)
+                        ? (int)((long long)end * total_chars / total_tokens) : total_chars;
+                    char_start = std::max(0, std::min(char_start, total_chars));
+                    char_end = std::max(char_start, std::min(char_end, total_chars));
+
+                    TokenizedChunk ch;
+                    ch.filename = fname + " [chunk " + std::to_string(chunk_num) + "]";
+                    ch.snippet = content.substr(char_start, std::min(500, char_end - char_start));
+                    ch.full_text = content.substr(char_start, char_end - char_start);
+
+                    if (use_prefix) {
+                        ch.tokens = prefix_tokens;
+                        ch.tokens.insert(ch.tokens.end(), all_tokens.begin() + start, all_tokens.begin() + end);
+                    } else {
+                        ch.tokens.assign(all_tokens.begin() + start, all_tokens.begin() + end);
+                    }
+                    chunks.push_back(std::move(ch));
+
+                    if (end >= total_tokens) break;
+                }
+                if (!g_quiet) std::cout << "  - " << fname << ": " << total_tokens
+                                        << " tokens -> " << chunk_num << " chunks" << std::endl;
+            }
         }
     }
 
@@ -308,15 +433,25 @@ int main(int argc, char ** argv) {
         std::vector<float> embedding(emb, emb + n_embd);
         normalize_embedding(embedding);
 
-        // Extract base filename (strip " [chunk N]" suffix) for mtime lookup
+        // Extract base filename (strip " [chunk N]" or " [MSGID]" suffix) for mtime lookup
         std::string base_fname = ch.filename;
-        auto bracket_pos = base_fname.find(" [chunk ");
+        auto bracket_pos = base_fname.find(" [");
         if (bracket_pos != std::string::npos) {
             base_fname = base_fname.substr(0, bracket_pos);
         }
         int64_t mtime = (int64_t)fs::last_write_time(fs::path(base_fname)).time_since_epoch().count();
 
-        store_insert(store, ch.filename, ch.snippet, source_type, mtime, embedding);
+        if (!ch.msgid.empty()) {
+            ChunkMeta meta;
+            meta.msgid = ch.msgid;
+            if (!ch.msgid.empty()) meta.severity = ch.msgid.back();
+            store_insert_full(store, ch.filename, ch.snippet, source_type, mtime,
+                              embedding, meta, ch.full_text);
+        } else {
+            ChunkMeta meta;
+            store_insert_full(store, ch.filename, ch.snippet, source_type, mtime,
+                              embedding, meta, ch.full_text);
+        }
 
         if (is_encoder) llama_batch_free(batch);
 

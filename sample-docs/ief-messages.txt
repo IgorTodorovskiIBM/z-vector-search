@@ -1,0 +1,59 @@
+IEF450I jobname - ABEND=Sxxx Uxxxx REASON=xxxxxxxx
+
+Explanation: The step was terminated because of an abnormal end (abend) condition. The abend code and reason code identify the specific error.
+
+System Action: The system terminates the step. If the job has additional steps, the system checks the COND parameter to determine whether to run them.
+
+Operator Response: Notify the programmer responsible for the job. The programmer should check the abend code in the appropriate messages manual. Common abend codes include S0C7 (data exception), S0C4 (protection exception), S0C1 (operation exception), and S322 (time limit exceeded).
+
+Programmer Response: Check the SYSUDUMP, SYSABEND, or SYSMDUMP output for the failing step. Use the abend code and reason code to determine the cause. For system abend codes, see z/OS MVS System Codes. For user abend codes, check the application documentation.
+
+IEF452I jobname - JOB NOT RUN - JCL ERROR
+
+Explanation: The job was not run because of a JCL error detected during job processing. The system detected a syntax or semantic error in the JCL statements.
+
+System Action: The job is flushed without execution. The JES job log will contain messages identifying the specific JCL errors.
+
+Operator Response: Notify the programmer responsible for the job.
+
+Programmer Response: Review the JCL error messages in the job log. Correct the JCL and resubmit the job. Common causes include misspelled keywords, missing DD statements, invalid parameter values, and incorrect continuation.
+
+IEF403I jobname - STARTED - TIME=hh.mm.ss
+
+Explanation: The job has started execution. The time shown is the time the job began executing its first step.
+
+System Action: Processing continues normally.
+
+Operator Response: None required. This is an informational message.
+
+IEF404I jobname - ENDED - TIME=hh.mm.ss
+
+Explanation: The job has ended execution. The time shown is the time the job completed processing.
+
+System Action: The system deallocates resources used by the job and releases the initiator for the next job.
+
+Operator Response: None required. This is an informational message.
+
+IEF196I IEF285I message
+
+Explanation: These messages provide allocation details for datasets used by the step. IEF285I identifies the volume serial number and device number for allocated datasets.
+
+System Action: None. This is informational.
+
+Operator Response: None required.
+
+IEF352I ADDRESS SPACE UNAVAILABLE
+
+Explanation: The system was unable to create a new address space because of a shortage of system resources. This may indicate a real storage shortage or that the maximum number of address spaces has been reached.
+
+System Action: The request to create the address space is rejected.
+
+Operator Response: Check for a real storage shortage (IEA101A messages). If the system is under storage pressure, cancel low-priority jobs or increase the real storage available. Monitor the number of active address spaces.
+
+IEF283I jobname stepname procstep ddname DISPOSITION
+
+Explanation: Shows the disposition of the specified dataset when the step ended. The disposition indicates whether the dataset was kept, deleted, cataloged, or uncataloged.
+
+System Action: The dataset is processed according to the disposition shown.
+
+Operator Response: None required unless the disposition is unexpected.

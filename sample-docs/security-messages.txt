@@ -1,0 +1,51 @@
+ICH408I USER(userid) GROUP(groupname) NAME(username) LOGON/JOB INITIATION - LOSS OF AUTHORITY
+
+Explanation: The specified user attempted to log on or initiate a job, but the user's authority has been revoked. This may be due to:
+  - Too many invalid password attempts (password revoked)
+  - User ID has been suspended by a security administrator
+  - User ID has expired
+  - Group authority has been revoked
+
+System Action: The logon or job initiation is rejected.
+
+Operator Response: Notify the security administrator. Do not reset the password or authority without proper authorization. This may indicate an attempted security breach.
+
+ICH70001I userid LAST ACCESS AT time ON date
+
+Explanation: This informational message shows when the specified user last accessed the system. It is issued during logon processing.
+
+System Action: None. This is informational.
+
+Operator Response: None required. Security administrators may use this information to identify dormant accounts.
+
+IRR010I USERID userid IS ASSIGNED TO THIS JOB
+
+Explanation: The specified user ID has been associated with the job for security checking purposes. All resource access checks during job execution will use this user ID.
+
+System Action: Processing continues with the assigned user ID.
+
+Operator Response: None required. This is informational.
+
+IRR012I VERIFICATION FAILED FOR USER userid
+
+Explanation: RACF verification of the user failed. The password, PassTicket, or certificate presented was not valid, or the user is not authorized to use the system or application.
+
+System Action: The logon, job, or transaction is rejected.
+
+Operator Response: Check if the user is legitimate. Multiple verification failures may indicate a security attack. Alert the security administrator if a pattern of failures is detected.
+
+IRR013I INSUFFICIENT AUTHORITY TO RESOURCE resourcename CLASS(classname)
+
+Explanation: A user attempted to access a resource but does not have the required authorization. RACF denied the access request.
+
+System Action: The access request is denied. The application receives a non-zero return code from the RACROUTE macro.
+
+Operator Response: If the access should be permitted, notify the security administrator to update the RACF profiles. If the access is unexpected, investigate as a potential security violation.
+
+ICH409I userid REVOKED - TOO MANY INVALID PASSWORD ATTEMPTS
+
+Explanation: The specified user ID has been revoked because the number of invalid password attempts exceeded the installation-defined limit.
+
+System Action: The user ID is revoked. All future logon and job initiation attempts will be rejected until a security administrator resets the user.
+
+Operator Response: Notify the security administrator. Do not reset the user without proper verification of identity. Multiple invalid attempts may indicate a brute-force attack.

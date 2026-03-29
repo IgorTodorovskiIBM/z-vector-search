@@ -1,0 +1,58 @@
+IEC030I reason,module,jobname,stepname,ddname,operation,error,device,serial,volseq,dsname
+
+Explanation: A data management error occurred during processing of a dataset. The error and reason codes identify the specific error condition.
+
+The reason field contains the abend code that will be issued:
+  001-4: S001 abend — I/O error on a BSAM or QSAM dataset
+  013-x: S013 abend — Error opening a dataset (member not found, PDS directory I/O error)
+  037-4: S037 abend — Output dataset space exhausted (end of volume, no more extents)
+  D37-4: SD37 abend — No space available on volume for output dataset
+  E37-4: SE37 abend — All volumes in the storage group are full
+
+System Action: The step is terminated with the abend code shown in the reason field.
+
+Operator Response: For space-related abends (x37), check available DASD space on the volume. You may need to compress, delete, or archive datasets to free space. For I/O errors (001), check the device for hardware problems. For open errors (013), verify the dataset name and member name.
+
+Programmer Response: Check the reason code and error code in z/OS DFSMS Macro Instructions for Data Sets. Common fixes include increasing primary or secondary allocation, specifying additional volumes, or fixing the dataset name.
+
+IEC031I reason,module,dsname
+
+Explanation: A VSAM data management error occurred. The reason code identifies the specific error. Common reason codes include:
+  008-008: Logical record length error
+  028-004: Out of space on volume
+  036-004: Key not found
+  092-xxx: RLS (Record Level Sharing) errors
+
+System Action: The request is rejected or the step is terminated, depending on the severity.
+
+Operator Response: For space-related errors, check VSAM catalog space and CI/CA splits. For RLS errors, check coupling facility connectivity. For key errors, this is typically an application issue.
+
+IEC141I reason,module,dsname
+
+Explanation: An error occurred during opening of a VSAM dataset. The reason code identifies the specific error condition.
+
+Common reason codes:
+  040: Catalog error during open
+  056: Catalog entry not found
+  068: Volume not mounted
+  104: Insufficient virtual storage for control blocks
+
+System Action: The OPEN macro fails with the indicated return code.
+
+Operator Response: For volume mount issues, mount the required volume. For catalog errors, verify the dataset name and catalog connectivity. For storage errors, check region size.
+
+IEC161I reason,module,dsname
+
+Explanation: A VSAM CLOSE processing error occurred. This may indicate that buffers could not be written back to the dataset, potentially causing data loss.
+
+System Action: The CLOSE completes with the indicated error. Data integrity may be compromised.
+
+Operator Response: Check the volume for I/O errors. If data loss is suspected, restore the dataset from a backup. Check the coupling facility for RLS datasets.
+
+IEC070I reason,jobname,stepname,ddname,dsname
+
+Explanation: Error during scratch (delete) processing of a non-VSAM dataset. The reason code indicates why the scratch failed.
+
+System Action: The dataset is not deleted. It may require manual cleanup.
+
+Operator Response: Check the reason code. Common causes include RACF protection preventing deletion, dataset in use by another job, or catalog errors.

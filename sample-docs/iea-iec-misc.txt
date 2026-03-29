@@ -1,0 +1,68 @@
+IEA101A REAL STORAGE SHORTAGE - SYSTEM WILL ATTEMPT TO RECOVER
+
+Explanation: The system has detected a critical shortage of real storage (central storage). The amount of available real storage has fallen below the minimum threshold required for system operation.
+
+System Action: The system attempts to recover by paging out frames and canceling non-essential address spaces. If recovery is successful, message IEA101E is issued.
+
+Operator Response: This is a critical condition. Take immediate action:
+  1. Cancel or reduce priority of batch jobs consuming large amounts of storage
+  2. Check for runaway tasks with growing working sets (use D A,L to display active jobs)
+  3. Monitor the situation until IEA101E indicates recovery
+  4. If the system does not recover, an IPL may be required
+  5. Consider increasing LFAREA or RSU values for future IPLs
+
+IEA230E LOGREC BUFFER SHORTAGE
+
+Explanation: The system logging facility (LOGREC) has run out of available buffer space. Error records may be lost until buffers are freed.
+
+System Action: New error records are discarded until buffer space becomes available.
+
+Operator Response: This may indicate excessive error recording, possibly due to a hardware problem generating many errors. Check for I/O errors or channel problems. If the condition persists, consider increasing the LOGREC buffer allocation.
+
+IEA848I NO DUMP WAS PRODUCED FOR THIS ABEND, DUE TO SYSTEM OR INSTALLATION REQUEST
+
+Explanation: A dump was requested for an abending task, but the dump was suppressed. This can occur when:
+  - The installation exit IEAVTABX suppressed the dump
+  - The SLIP trap specified NODUMP
+  - The dump dataset is full or unavailable
+  - The system is under storage pressure
+
+System Action: The abend is processed normally, but no dump is produced.
+
+Operator Response: If the dump is needed for diagnosis, check the dump suppression settings. Verify that dump datasets (SYS1.DUMPxx) have available space. Check for SLIP traps that may be suppressing dumps.
+
+IEE042I SYSTEM LOG INITIALIZED
+
+Explanation: The system log (SYSLOG) has been initialized. This typically occurs during IPL.
+
+System Action: Console message recording begins.
+
+Operator Response: None required. This is informational.
+
+IEE037D REPLY TO MESSAGE identifier
+
+Explanation: An outstanding reply is required. The system is waiting for an operator response to a previous WTOR (Write To Operator with Reply) message.
+
+System Action: Processing is suspended until a reply is provided.
+
+Operator Response: Reply to the outstanding message. Use D R,L to display all outstanding replies. The original message will indicate what response is required.
+
+CSV003E REQUESTED MODULE modulename NOT FOUND
+
+Explanation: The system could not find the requested module in the link list, LPA, or the job's STEPLIB/JOBLIB concatenation. The module may not have been installed, or the library containing it may not be in the search order.
+
+System Action: The LOAD or LINK macro fails with a return code of 4 or 8.
+
+Operator Response: Check whether the module exists and whether the library containing it is accessible. Common causes:
+  - Module not installed (SMP/E apply not run)
+  - Library not in LNKLST or LPA
+  - Misspelled module name
+  - Library authorization issue (APF)
+
+IOS000I device-number,channel-set,sss, ...IOB-status,CSW-status,sense
+
+Explanation: An I/O error occurred on the specified device. The sense data and CSW (Channel Status Word) information identify the specific hardware error.
+
+System Action: The system attempts error recovery. If recovery fails, the job step may be terminated.
+
+Operator Response: Record the error information and report it to the hardware support team. If errors are frequent on a device, consider varying the device offline and running diagnostics. For DASD devices, check the error log for patterns indicating a failing device.
