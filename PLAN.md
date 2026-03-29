@@ -1,246 +1,283 @@
-# z/OS Console RAG — Implementation Plan
+# z/OS Console RAG Assistant v2 — Implementation Plan
 
 ## Vision
 
-A RAG-powered assistant that enriches z/OS operator console messages with instant, searchable context from IBM documentation, site runbooks, job definitions, and historical operator actions. Turns tribal knowledge into searchable knowledge.
+A RAG-powered assistant that gives z/OS operators instant, searchable context for console messages — combining semantic understanding with structured keyword search, timeline correlation, and proactive alerting. Turns tribal knowledge into searchable knowledge.
 
-## Architecture Overview
+## Current State
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Corpus Ingestion                       │
-│                                                         │
-│  IBM Message Manuals ──┐                                │
-│  Site Runbooks ────────┤                                │
-│  JCL/PROC Library ─────┼──→ z-index ──→ sqlite-vec DB  │
-│  OPERLOG History ──────┤                                │
-│  APAR/PTF Docs ────────┘                                │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│                   Query Pipeline                         │
-│                                                         │
-│  SYSLOG/OPERLOG ──→ Message Parser ──→ z-query          │
-│                                           │             │
-│                                      sqlite-vec DB      │
-│                                           │             │
-│                                     Top-K Results       │
-│                                           │             │
-│                              ┌─────────────┴──────┐     │
-│                              │                    │     │
-│                         TN3270 Panel      Web UI / CLI  │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## Phase 1: sqlite-vec Migration
-
-Replace the flat binary store with SQLite + sqlite-vec for incremental indexing, metadata filtering, and scalability.
-
-### 1.1 Integrate SQLite and sqlite-vec
-
-- [ ] Add SQLite as a dependency in CMakeLists.txt
-  - SQLite is a single C file (sqlite3.c + sqlite3.h) — vendor it directly
-- [ ] Add sqlite-vec extension (single file: sqlite-vec.c + sqlite-vec.h)
-- [ ] Verify both compile on z/OS with ASCII mode and -m64 flags
-- [ ] Update link step to include sqlite3 and sqlite-vec
-
-### 1.2 Define the schema
+Five executables: `z-index`, `z-query`, `z-console`, `z-ingest-console`, `z-vector-search` (one-shot). SQLite + sqlite-vec store with schema:
 
 ```sql
--- Vector index for embedding similarity search
-CREATE VIRTUAL TABLE vec_chunks USING vec0(
-    embedding float[768]    -- dimension from model, detected at runtime
-);
-
--- Metadata for each chunk (rowid matches vec_chunks rowid)
-CREATE TABLE chunks(
-    id INTEGER PRIMARY KEY,
-    filename TEXT NOT NULL,
-    snippet TEXT NOT NULL,
-    source_type TEXT,        -- 'ibm_doc', 'runbook', 'jcl', 'operlog', etc.
-    mtime INTEGER,           -- file modification time for change detection
-    created_at INTEGER DEFAULT (unixepoch())
-);
-
--- Fast lookups for incremental indexing
-CREATE INDEX idx_chunks_filename ON chunks(filename);
-CREATE INDEX idx_chunks_source_type ON chunks(source_type);
+chunks(id INTEGER PRIMARY KEY, filename TEXT, snippet TEXT, source_type TEXT, mtime INTEGER)
+vec_chunks USING vec0(embedding float[N])
 ```
 
-### 1.3 Replace common_store.h serialization
+Configurable message filtering via `~/.z-vector-search/skip_msgids.txt`. Background daemon via `z-console-daemon.sh`. All tools default to `$HOME/.z-vector-search/` for model and store.
 
-- [ ] New file: `store_sqlite.h` / `store_sqlite.cpp`
-  - `open_store(path)` — open or create DB, initialize schema
-  - `insert_records(db, records)` — batch INSERT within a transaction
-  - `delete_by_filename(db, filename)` — remove stale chunks
-  - `query_similar(db, embedding, top_k)` — vector search + metadata join
-  - `get_indexed_files(db)` — return filename→mtime map for change detection
-- [ ] Keep `common_store.h` temporarily for backward compat, remove later
-
-### 1.4 Incremental indexing in z-index
-
-- [ ] On startup, load filename→mtime map from DB
-- [ ] Scan directory, compare mtime for each file
-  - **New file** → chunk, embed, INSERT
-  - **Modified file** → DELETE old chunks, re-chunk, embed, INSERT
-  - **Unchanged file** → skip
-  - **Deleted file** → DELETE orphaned chunks
-- [ ] Wrap each file's operations in a transaction for atomicity
-- [ ] Report: "Indexed 12 new, updated 3, removed 1, skipped 284"
-
-### 1.5 Update z-query
-
-- [ ] Replace `load_store()` + linear scan with `query_similar()` SQL
-- [ ] Add `--source-type` filter flag (e.g., search only runbooks)
-- [ ] Add `--filename` filter flag (e.g., search only within a specific job's docs)
-- [ ] Keep JSON and plain text output formats
-
-### 1.6 Migration utility
-
-- [ ] `z-migrate` tool: reads old `.bin` store, writes to new `.db`
-- [ ] One-time use, can be removed later
-
-**Deliverable:** z-index and z-query work with sqlite-vec, support incremental updates.
+**Key gap:** All queries go through vector similarity only. No keyword/structured search. No structured metadata stored for console messages (msgid, severity, jobname, timestamps are parsed but discarded at ingest time).
 
 ---
 
-## Phase 2: Corpus Ingestion for z/OS
+## Phase 1: Schema Enrichment (Foundation)
 
-Build ingestors for the key document types that operators need during incidents.
+Add structured columns to `chunks` so SQLite can answer keyword and timeline queries without touching the vector engine.
 
-### 2.1 IBM Message Manual ingestor
+### Schema Migration
 
-- [ ] Parse IBM MVS System Messages (PDF or BookManager format)
-- [ ] Extract per-message-ID entries: message text, explanation, system action, operator response
-- [ ] Chunk strategy: one chunk per message ID (these are naturally small)
-- [ ] Tag with `source_type = 'ibm_doc'`
-- [ ] Handle multi-volume coverage (IEF, IEC, IGD, IEA, CSV, etc.)
+Add columns via `ALTER TABLE` in `store_open()` for backward compatibility with existing databases. Detect missing columns with `PRAGMA table_info(chunks)`.
 
-### 2.2 Runbook / Markdown / Text ingestor
+```sql
+-- New columns added to existing chunks table:
+ALTER TABLE chunks ADD COLUMN msgid TEXT DEFAULT '';
+ALTER TABLE chunks ADD COLUMN severity CHAR(1) DEFAULT '';
+ALTER TABLE chunks ADD COLUMN jobname TEXT DEFAULT '';
+ALTER TABLE chunks ADD COLUMN sysname TEXT DEFAULT '';
+ALTER TABLE chunks ADD COLUMN ts_start TEXT DEFAULT '';        -- HH:MM:SS.TH
+ALTER TABLE chunks ADD COLUMN ts_end TEXT DEFAULT '';          -- HH:MM:SS.TH
+ALTER TABLE chunks ADD COLUMN julian_date TEXT DEFAULT '';     -- YYYYDDD
+ALTER TABLE chunks ADD COLUMN msg_count INTEGER DEFAULT 0;
 
-- [ ] Already works for .txt and .md — extend with smarter chunking
-- [ ] Preserve heading hierarchy as metadata (so results show "Section: Disk Full Procedures")
-- [ ] Tag with `source_type = 'runbook'`
-
-### 2.3 JCL / PROC / COBOL ingestor
-
-- [ ] Add file type support: `.jcl`, `.proc`, `.cbl`, `.cpy`, `.asm`, `.rexx`, `.pli`
-- [ ] JCL-aware chunking: split on `//JOBNAME JOB` or `//STEPNAME EXEC` boundaries
-- [ ] COBOL-aware chunking: split on DIVISION / SECTION / paragraph boundaries
-- [ ] Tag with `source_type = 'source'`
-
-### 2.4 OPERLOG / SYSLOG history ingestor
-
-- [ ] Parse OPERLOG records (timestamp, system, jobname, message ID, message text)
-- [ ] Group by incident window (messages within N minutes of an action message)
-- [ ] Include operator responses (replies to WTORs) as part of the chunk
-- [ ] Tag with `source_type = 'operlog'`
-- [ ] Incremental: only ingest records newer than last high-water mark
-
-**Deliverable:** A rich, multi-source vector store covering documentation, code, and operational history.
-
----
-
-## Phase 3: Console Message Integration
-
-Connect the query pipeline to live console output.
-
-### 3.1 Message parser
-
-- [ ] Extract structured fields from WTO/WTOR messages:
-  - Message ID (e.g., `IEF450I`)
-  - Severity (I/W/E/A — informational, warning, error, action)
-  - Job name, step name, system name
-  - Free-text body
-- [ ] Construct a natural language query from these fields
-  - e.g., `"IEF450I ABEND S0C7 in job PAYROLL step SORT"`
-
-### 3.2 Severity-based filtering
-
-- [ ] Not every message needs RAG — filter to high-value messages:
-  - Action messages (WTORs) — always
-  - ABEND messages (S0xx, Uxxxx) — always
-  - IEC (data management errors) — always
-  - IEF (job/step failures) — always
-  - Configurable inclusion list for site-specific message prefixes
-- [ ] Skip informational chatter (job start/end, initiator messages)
-
-### 3.3 CLI integration (MVP)
-
-- [ ] `z-console` command: accepts a console message as input, returns enriched context
-  ```
-  z-console "IEC030I E37-04,IFG0554P,PAYROLL,STEP03,SORTWORK,VOL001"
-  ```
-- [ ] Output: ranked results from all source types, formatted for quick reading
-- [ ] Can be piped from SYSLOG tail: `tail -f /var/log/syslog | z-console --stream`
-
-### 3.4 EMCS console exit (production integration)
-
-- [ ] Write an MPF (Message Processing Facility) exit or EMCS console automation
-- [ ] Captures matching messages, invokes z-console, routes enriched output to a designated console or log
-- [ ] Runs as a started task so it's always available
-
-**Deliverable:** Operators get instant context for critical console messages.
-
----
-
-## Phase 4: Polish and Production Readiness
-
-### 4.1 Daemon mode
-
-- [ ] Long-running `z-queryd` process that keeps the model loaded in memory
-- [ ] Accepts queries over a Unix domain socket or TCP port
-- [ ] Eliminates ~2s model load time per query — critical for real-time console use
-- [ ] Simple request/response protocol (JSON over newline-delimited stream)
-
-### 4.2 Scheduled re-indexing
-
-- [ ] Cron job or started task to periodically re-index updated sources
-- [ ] Incremental indexing (Phase 1.4) makes this fast — only processes changes
-- [ ] Alert if index is stale (no re-index in >N days)
-
-### 4.3 TN3270 panel interface
-
-- [ ] REXX/ISPF dialog that operators can invoke from TSO/ISPF
-- [ ] Sends query to z-queryd daemon, displays results in a scrollable panel
-- [ ] Feels native to the z/OS operator workflow
-
-### 4.4 Metrics and feedback loop
-
-- [ ] Log queries and which results operators found useful (click/select tracking)
-- [ ] Use feedback to identify gaps in the corpus (messages with no good results)
-- [ ] Track index coverage: what % of message IDs have relevant docs indexed
-
----
-
-## File Changes Summary
-
-```
-z-vector-search/
-├── CMakeLists.txt           # Updated: add sqlite3, sqlite-vec deps
-├── common_store.h           # Deprecated → replaced by store_sqlite
-├── store_sqlite.h           # New: SQLite + sqlite-vec store interface
-├── store_sqlite.cpp         # New: store implementation
-├── index.cpp                # Modified: incremental indexing, source types
-├── query.cpp                # Modified: sqlite-vec queries, filters
-├── main.cpp                 # Modified: use new store
-├── console.cpp              # New: message parser + console RAG tool
-├── migrate.cpp              # New: bin→sqlite migration utility
-├── vendor/
-│   ├── sqlite3.c            # Vendored SQLite amalgamation
-│   ├── sqlite3.h
-│   ├── sqlite-vec.c         # Vendored sqlite-vec extension
-│   └── sqlite-vec.h
-└── PLAN.md                  # This file
+-- Indexes for structured queries:
+CREATE INDEX IF NOT EXISTS idx_chunks_msgid ON chunks(msgid);
+CREATE INDEX IF NOT EXISTS idx_chunks_severity ON chunks(severity);
+CREATE INDEX IF NOT EXISTS idx_chunks_jobname ON chunks(jobname);
+CREATE INDEX IF NOT EXISTS idx_chunks_sysname ON chunks(sysname);
+CREATE INDEX IF NOT EXISTS idx_chunks_ts ON chunks(ts_start, ts_end);
+CREATE INDEX IF NOT EXISTS idx_chunks_julian ON chunks(julian_date);
 ```
 
-## Build Order
+### Changes
 
-**Phase 1** is the foundation — nothing else works without sqlite-vec.
-**Phase 2** can be done incrementally (one ingestor at a time).
-**Phase 3** depends on Phase 1 + at least one Phase 2 ingestor.
-**Phase 4** is production hardening, do it when the MVP proves value.
+- **`store_sqlite.h`**: Add `store_migrate()` called from `store_open()`. Expand `store_insert()` to accept new fields (with backward-compatible default overload). Expand `QueryResult` to include new fields.
 
-Estimated MVP (Phases 1 + 2.1 + 3.3): sqlite-vec store, IBM message docs indexed, CLI console query tool.
+### Design Decision
+
+One table, not two. Doc chunks have empty msgid/severity/jobname columns. Operlog chunks populate them. This keeps all queries returning the same `QueryResult` type — no joins needed.
+
+---
+
+## Phase 2: Enriched Ingestion
+
+Populate the new columns at ingest time so structured queries have data.
+
+### Changes to `ingest_console.cpp`
+
+1. `ConsoleChunk` struct gains: `std::vector<std::string> msgids`, `char max_severity`, `std::string julian_date`, `msg_count` (already present).
+2. `group_into_chunks()` collects unique msgids per window, tracks highest severity (A > E > W > S > I).
+3. Parse julian date from SYSLOG lines (currently skipped over — capture the 7-digit field).
+4. At insert time, store comma-separated msgids in `msgid` column (enables `LIKE '%IEF450I%'`), highest severity in `severity`, first jobname in `jobname`, sysname/timestamps/julian_date.
+
+### Changes to `index.cpp`
+
+When `--source-type ibm_doc` is used, extract msgid from chunk content using `extract_msgid()` and store it in the `msgid` column. This makes IBM docs keyword-searchable by message ID.
+
+---
+
+## Phase 3: Hybrid Search Engine
+
+The core feature. Auto-detect query type and route to the right search engine.
+
+### Query Classification
+
+`classify_query(query)` returns `SEARCH_SEMANTIC`, `SEARCH_KEYWORD`, or `SEARCH_HYBRID`:
+
+| Pattern | Detection | Mode |
+|---------|-----------|------|
+| `IEF450I` | All uppercase, matches msgid pattern | KEYWORD |
+| `DFH*` | Contains `*` wildcard | KEYWORD |
+| `JOB:PAYROLL` | Structured prefix | KEYWORD |
+| `SEV:E` | Structured prefix | KEYWORD |
+| `"storage shortage during batch"` | Lowercase, spaces, natural language | SEMANTIC |
+| `"IEC030I data management error"` | Msgid + natural language | HYBRID |
+
+Implementation: character scanning only (no `std::regex`). Reuse `extract_msgid()` logic.
+
+### Keyword Search
+
+New function `store_keyword_query()` in `store_sqlite.h`:
+
+```cpp
+struct KeywordQuery {
+    std::string msgid_pattern;    // "IEF450I" or "DFH%" (SQL LIKE)
+    std::string jobname_pattern;  // "PAYROLL" or "PAY%"
+    std::string sysname;          // exact match
+    char severity;                // 'E', 'A', etc. or '\0'
+    std::string text_pattern;     // LIKE on snippet
+    std::string source_type;      // filter
+};
+```
+
+Build `SELECT ... WHERE` with clauses for non-empty fields. Convert user wildcards `*` → `%`, `?` → `_`. Order by `julian_date DESC, ts_start DESC`.
+
+### Hybrid Merge (Reciprocal Rank Fusion)
+
+For hybrid mode:
+1. Run keyword query → up to `2 * top_k` results
+2. Run vector similarity → up to `2 * top_k` results
+3. Merge: `score(d) = Σ 1/(k + rank_i)` where `k=60`
+4. Return top-k by merged score
+
+RRF needs only addition and division. No score normalization across domains. The constant `k=60` is standard and doesn't need tuning.
+
+### Files
+
+- **New: `hybrid_search.h`** — `classify_query()`, `parse_structured_query()`, `hybrid_merge()`
+- **Modified: `store_sqlite.h`** — `store_keyword_query()`
+- **Modified: `query.cpp`** — route through hybrid search
+- **Modified: `console.cpp`** — use hybrid for msgid lookups
+
+---
+
+## Phase 4: Enhanced Query Interface
+
+### New flags for `z-query`
+
+| Flag | Description |
+|------|-------------|
+| `--msgid PATTERN` | Search by message ID (`IEC030I`, `DFH*`) |
+| `--job PATTERN` | Filter by jobname |
+| `--sys SYSNAME` | Filter by system name |
+| `--severity E` | Filter by severity (A, E, W, I) |
+| `--since HH:MM` | Messages after this time |
+| `--before HH:MM` | Messages before this time |
+| `--date YYYYDDD` | Filter by julian date |
+| `--mode auto\|semantic\|keyword\|hybrid` | Force search mode (default: auto) |
+
+### Examples
+
+```bash
+# Auto-detects keyword (exact msgid)
+z-query "IEF450I"
+
+# Auto-detects keyword (wildcard)
+z-query "DFH*"
+
+# Auto-detects semantic (natural language)
+z-query "what causes a S0C7 abend in COBOL"
+
+# Auto-detects hybrid (msgid + natural language)
+z-query "IEC030I data management error on tape"
+
+# Explicit structured query
+z-query --msgid "IEC03*" --severity E --job "PAYROLL"
+
+# Timeline query (see Phase 5)
+z-query --date 2026087 --since 17:00 --before 18:00 --severity A
+```
+
+### Enhanced `z-console` Output
+
+For each interesting message, two-phase lookup:
+1. **Keyword** on `msgid` → IBM documentation (exact match, no embedding needed)
+2. **Semantic** on full text → past incidents, runbooks, broader context
+
+Display as separate sections:
+```
+IEF450I PAYROLL - ABEND=S0C7 U0000 - REASON=00000000
+  Documentation: [from keyword match on IEF450I]
+    Step was terminated due to an abend condition...
+  Related Context: [from semantic search]
+    Similar event on 2026-03-15 in job PAYROLL2, resolved by...
+```
+
+---
+
+## Phase 5: Timeline Correlation
+
+Enable "what happened around this time" queries.
+
+### `store_timeline_query()`
+
+```cpp
+std::vector<QueryResult> store_timeline_query(
+    StoreDB &store,
+    const std::string &julian_date,
+    const std::string &timestamp,
+    int window_minutes,
+    const std::string &sysname = "");
+```
+
+SQL: select chunks where `julian_date = ?` and `ts_start`/`ts_end` overlap with `[timestamp - window, timestamp + window]`. Timestamps are `HH:MM:SS.TH` strings — they sort lexicographically. Compute bounds by parsing hours/minutes, handle midnight rollover.
+
+### CLI
+
+```bash
+# What happened around 17:30?
+z-query --timeline 17:30 --window 10 --date 2026087
+
+# What happened around when CICS went down?
+z-query --timeline 17:30 --window 10 --msgid "DFH*"
+```
+
+### In `z-console`
+
+Add `--timeline` flag. For each interesting message, after RAG results, show: "In the 5 minutes before this error:" with the preceding chunk's messages.
+
+---
+
+## Phase 6: Daemon Alerting
+
+### Alert Rules File (`~/.z-vector-search/alert_rules.txt`)
+
+```
+# FORMAT: CONDITION → ACTION
+# Conditions: msgid=PATTERN, severity=X, count>N
+# Actions: log, cmd:COMMAND
+
+severity=A                log
+msgid=IEA*                log
+severity=E count>5        cmd:echo "Error storm" >> /tmp/z-alerts.log
+msgid=ICH*                cmd:/path/to/security_alert.sh
+```
+
+### Implementation
+
+- **New: `alert_rules.h`** — parse rules file, evaluate against query results
+- After each daemon ingest cycle, query the store for the just-ingested window
+- Evaluate each rule. If matched, execute the action.
+- New `--alerts` flag on daemon script
+
+---
+
+## Phase 7: IBM Message Manual Ingestion
+
+Add `--ibm-messages` flag to `z-index`. When set:
+
+1. Parse each file looking for message ID patterns at line starts
+2. Everything between one msgid and the next = one chunk
+3. Store msgid in the `msgid` column, `source_type = 'ibm_doc'`
+
+This makes `z-query "IEF450I"` hit the IBM doc directly via keyword search — zero embedding cost for exact lookups.
+
+---
+
+## Dependency Graph
+
+```
+Phase 1 (Schema) ──→ Phase 2 (Enriched Ingest) ──→ Phase 3 (Hybrid Search)
+                                                          │
+                                                          ├──→ Phase 4 (CLI)
+                                                          ├──→ Phase 5 (Timeline)
+                                                          └──→ Phase 6 (Alerting)
+
+Phase 7 (IBM Docs) can start after Phase 1
+```
+
+## Recommended Build Order
+
+1. **Phase 1 + 2** together (one commit — schema + populate it)
+2. **Phase 3 + 4** together (the big feature — hybrid search + CLI)
+3. **Phase 7** (makes keyword search immediately useful for docs)
+4. **Phase 5** (timeline adds incident investigation power)
+5. **Phase 6** (alerting is a nice-to-have on top)
+
+## z/OS Compatibility
+
+All changes stay within existing constraints:
+- No `std::regex` — character scanning or SQLite LIKE only
+- No boost — pure C++17 standard library
+- No external threads beyond llama.cpp
+- SQLite LIKE is built-in, no new extensions needed
+- All string handling stays ASCII-safe (Enhanced ASCII mode)
+- `__MVS__` guards where needed for z/OS-specific type differences

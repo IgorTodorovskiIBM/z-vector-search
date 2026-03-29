@@ -11,6 +11,7 @@
 #include "common_store.h"
 #include "store_sqlite.h"
 #include "defaults.h"
+#include "msg_filter.h"
 
 static bool g_quiet = false;
 
@@ -44,11 +45,12 @@ static bool is_record_type(char c) {
 
 // A single parsed SYSLOG line
 struct SyslogLine {
-    std::string timestamp;   // HH:MM:SS.TH
+    std::string timestamp;     // HH:MM:SS.TH
     std::string sysname;
     std::string jobname;
-    std::string text;        // message text portion (continuations joined)
-    std::string msgid;       // extracted message ID if any
+    std::string julian_date;   // YYYYDDD
+    std::string text;          // message text portion (continuations joined)
+    std::string msgid;         // extracted message ID if any
 };
 
 // Extract message ID from text
@@ -99,8 +101,10 @@ static bool parse_syslog_line(const std::string &line, SyslogLine &out) {
     if (pos > sysname_start) out.sysname = line.substr(sysname_start, pos - sysname_start);
     while (pos < line.size() && line[pos] == ' ') pos++;
 
-    // Julian date
+    // Julian date (YYYYDDD)
+    size_t jd_start = pos;
     while (pos < line.size() && isdigit(line[pos])) pos++;
+    if (pos > jd_start) out.julian_date = line.substr(jd_start, pos - jd_start);
     while (pos < line.size() && line[pos] == ' ') pos++;
 
     // Timestamp
@@ -126,26 +130,60 @@ static bool parse_syslog_line(const std::string &line, SyslogLine &out) {
     return true;
 }
 
+// Severity ranking: A(action) > E(error) > W(warning) > S(severe) > D > X > I(info)
+static int severity_rank(char c) {
+    switch (c) {
+        case 'A': return 7;
+        case 'E': return 6;
+        case 'W': return 5;
+        case 'S': return 4;
+        case 'D': return 3;
+        case 'X': return 2;
+        case 'I': return 1;
+        default:  return 0;
+    }
+}
+
 // A time-windowed chunk of console messages
 struct ConsoleChunk {
     std::string window_start;  // timestamp of first message
     std::string window_end;    // timestamp of last message
     std::string sysname;
+    std::string julian_date;   // YYYYDDD
     std::string text;          // all message lines joined
     int msg_count = 0;
     std::string snippet;       // first 500 chars for display
+    // Structured metadata
+    std::vector<std::string> msgids;  // unique msgids in this window
+    std::string first_jobname;
+    char max_severity = '\0';
 };
 
 // Group SYSLOG lines into time-windowed chunks.
-// window_minutes controls how many minutes of messages go into each chunk.
-static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw, int window_minutes) {
+// Splits on time window boundary OR when max_msgs is reached, whichever comes first.
+// Filtered messages (matching the skip list) are excluded before chunking.
+static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw,
+                                                    int window_minutes,
+                                                    int max_msgs,
+                                                    const MsgFilter &filter,
+                                                    int &filtered_count) {
     std::vector<ConsoleChunk> chunks;
+    filtered_count = 0;
 
     std::istringstream stream(raw);
     std::string line;
 
     ConsoleChunk current;
     int current_window_start_min = -1;
+
+    auto flush_chunk = [&]() {
+        if (current.msg_count > 0) {
+            current.snippet = current.text.substr(0, 500);
+            chunks.push_back(std::move(current));
+            current = ConsoleChunk();
+            current_window_start_min = -1;
+        }
+    };
 
     while (std::getline(stream, line)) {
         if (line.size() < 10) continue;
@@ -165,6 +203,12 @@ static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw, int w
         if (!parse_syslog_line(line, sl)) continue;
         if (sl.text.empty()) continue;
 
+        // Apply message filter
+        if (filter.loaded && msg_filter_skip(filter, sl.msgid)) {
+            filtered_count++;
+            continue;
+        }
+
         // Determine the time window this message belongs to
         int hour = 0, minute = 0;
         if (sl.timestamp.size() >= 5) {
@@ -174,11 +218,10 @@ static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw, int w
         int total_minutes = hour * 60 + minute;
         int window_start = (total_minutes / window_minutes) * window_minutes;
 
-        // Start a new chunk if the time window changed
-        if (window_start != current_window_start_min && current.msg_count > 0) {
-            current.snippet = current.text.substr(0, 500);
-            chunks.push_back(std::move(current));
-            current = ConsoleChunk();
+        // Start a new chunk if the time window changed or max messages reached
+        if ((window_start != current_window_start_min && current.msg_count > 0) ||
+            (max_msgs > 0 && current.msg_count >= max_msgs)) {
+            flush_chunk();
         }
 
         current_window_start_min = window_start;
@@ -186,8 +229,24 @@ static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw, int w
         if (current.window_start.empty()) {
             current.window_start = sl.timestamp;
             current.sysname = sl.sysname;
+            current.julian_date = sl.julian_date;
+            current.first_jobname = sl.jobname;
         }
         current.window_end = sl.timestamp;
+
+        // Track unique msgids and max severity
+        if (!sl.msgid.empty()) {
+            bool found = false;
+            for (const auto &m : current.msgids) {
+                if (m == sl.msgid) { found = true; break; }
+            }
+            if (!found) current.msgids.push_back(sl.msgid);
+
+            char sev = sl.msgid.back();
+            if (severity_rank(sev) > severity_rank(current.max_severity)) {
+                current.max_severity = sev;
+            }
+        }
 
         // Build the text: include jobname and message
         if (!current.text.empty()) current.text += "\n";
@@ -197,10 +256,7 @@ static std::vector<ConsoleChunk> group_into_chunks(const std::string &raw, int w
     }
 
     // Flush last chunk
-    if (current.msg_count > 0) {
-        current.snippet = current.text.substr(0, 500);
-        chunks.push_back(std::move(current));
-    }
+    flush_chunk();
 
     return chunks;
 }
@@ -292,8 +348,11 @@ static void print_usage(const char *prog) {
               << "            store=" << get_default_store() << "\n"
               << "\nOptions:\n"
               << "  --window N         Minutes per chunk (default: 5)\n"
+              << "  --max-chunk N      Max messages per chunk (default: 50)\n"
               << "  --threads N        Encoding threads (default: 4)\n"
               << "  --prefix           Add search_document: prefix\n"
+              << "  --no-filter        Disable message filtering (index everything)\n"
+              << "  --filter FILE      Custom filter file (default: " << get_default_filter_path() << ")\n"
               << "  --quiet            Suppress progress output\n"
               << "\nPcon flags (passed through to pcon):\n"
               << "  -r                 Last 10 minutes (default)\n"
@@ -309,8 +368,11 @@ static void print_usage(const char *prog) {
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     int window_minutes = 5;
+    int max_msgs_per_chunk = 50;
     int n_threads = 4;
     bool use_prefix = false;
+    bool no_filter = false;
+    std::string filter_path;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--quiet") == 0) {
@@ -319,9 +381,19 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
             use_prefix = true;
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--no-filter") == 0) {
+            no_filter = true;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--filter") == 0 && arg_idx + 1 < argc) {
+            filter_path = argv[arg_idx + 1];
+            arg_idx += 2;
         } else if (strcmp(argv[arg_idx], "--window") == 0 && arg_idx + 1 < argc) {
             window_minutes = std::atoi(argv[arg_idx + 1]);
             if (window_minutes < 1) window_minutes = 1;
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--max-chunk") == 0 && arg_idx + 1 < argc) {
+            max_msgs_per_chunk = std::atoi(argv[arg_idx + 1]);
+            if (max_msgs_per_chunk < 1) max_msgs_per_chunk = 0;  // 0 = unlimited
             arg_idx += 2;
         } else if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
             n_threads = std::atoi(argv[arg_idx + 1]);
@@ -368,6 +440,18 @@ int main(int argc, char ** argv) {
 
     ensure_default_dir();
 
+    // Load message filter
+    MsgFilter filter;
+    if (!no_filter) {
+        filter = load_msg_filter(filter_path);
+        if (!g_quiet) {
+            std::cout << "Filter: " << filter.exact.size() << " exact + "
+                      << filter.prefix.size() << " prefix rules from "
+                      << (filter_path.empty() ? get_default_filter_path() : filter_path)
+                      << std::endl;
+        }
+    }
+
     llama_log_set(llama_log_callback, NULL);
 
     // Run pcon
@@ -385,9 +469,14 @@ int main(int argc, char ** argv) {
     }
 
     // Group into time-windowed chunks
-    auto chunks = group_into_chunks(raw, window_minutes);
+    int filtered_count = 0;
+    auto chunks = group_into_chunks(raw, window_minutes, max_msgs_per_chunk, filter, filtered_count);
     if (chunks.empty()) {
-        if (!g_quiet) std::cout << "No messages to ingest." << std::endl;
+        if (!g_quiet) {
+            std::cout << "No messages to ingest.";
+            if (filtered_count > 0) std::cout << " (" << filtered_count << " filtered)";
+            std::cout << std::endl;
+        }
         return 0;
     }
 
@@ -395,7 +484,10 @@ int main(int argc, char ** argv) {
         int total_msgs = 0;
         for (auto &c : chunks) total_msgs += c.msg_count;
         std::cout << "Parsed " << total_msgs << " messages into "
-                  << chunks.size() << " chunks (" << window_minutes << " min windows)" << std::endl;
+                  << chunks.size() << " chunks (" << window_minutes << " min windows, max "
+                  << max_msgs_per_chunk << " msgs/chunk)";
+        if (filtered_count > 0) std::cout << ", " << filtered_count << " filtered";
+        std::cout << std::endl;
     }
 
     // Initialize llama.cpp
@@ -526,7 +618,22 @@ int main(int argc, char ** argv) {
         // filename = "operlog/SYSNAME/start-end"
         // snippet = first 500 chars of the chunk (for display in search results)
         // source_type = "operlog"
-        store_insert(store, chunk_name, chunk.snippet, "operlog", 0, embedding);
+        // Build structured metadata
+        ChunkMeta meta;
+        // Join msgids with commas
+        for (size_t mi = 0; mi < chunk.msgids.size(); mi++) {
+            if (mi > 0) meta.msgid += ",";
+            meta.msgid += chunk.msgids[mi];
+        }
+        meta.severity = chunk.max_severity;
+        meta.jobname = chunk.first_jobname;
+        meta.sysname = chunk.sysname;
+        meta.ts_start = chunk.window_start;
+        meta.ts_end = chunk.window_end;
+        meta.julian_date = chunk.julian_date;
+        meta.msg_count = chunk.msg_count;
+
+        store_insert_full(store, chunk_name, chunk.snippet, "operlog", 0, embedding, meta);
         inserted++;
 
         if (is_encoder) llama_batch_free(batch);

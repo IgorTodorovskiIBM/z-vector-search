@@ -10,6 +10,7 @@
 #include "common_store.h"
 #include "store_sqlite.h"
 #include "defaults.h"
+#include "msg_filter.h"
 
 static bool g_quiet = false;
 static bool g_verbose = false;
@@ -109,31 +110,24 @@ static std::string extract_msgid(const std::string &text) {
     return "";
 }
 
+// Shared filter — loaded once on first call
+static MsgFilter g_msg_filter;
+static bool g_msg_filter_loaded = false;
+
+static void ensure_filter_loaded() {
+    if (!g_msg_filter_loaded) {
+        g_msg_filter = load_msg_filter();
+        g_msg_filter_loaded = true;
+    }
+}
+
 // Known high-value message prefixes that warrant RAG lookup
 static bool is_interesting_message(const std::string &msgid) {
     if (msgid.empty()) return false;
 
-    // Skip noisy messages that appear constantly
-    static const char *skip_msgids[] = {
-        "IEF196I",   // Allocation details (very frequent, low value)
-        "IEF695I",   // Job assignment (informational)
-        "IEF285I",   // Volume/dataset allocation
-        "IEF237I",   // JES2 allocation
-        "IGD103I",   // SMS allocation
-        "IGD104I",   // Dataset retained
-        "IRR010I",   // Userid assigned
-        "ICH70001I", // Last access notification
-        "IEF188I",   // Problem program attributes
-        "IEE042I",   // System log initialized
-        "IEF176I",   // Writer waiting for work
-        nullptr
-    };
-    for (int i = 0; skip_msgids[i]; i++) {
-        if (msgid == skip_msgids[i]) return false;
-    }
-
-    // Skip all $HASP messages (JES2 chatter: job start/end/spool)
-    if (msgid.compare(0, 5, "$HASP") == 0) return false;
+    // Skip messages matching the configurable filter
+    ensure_filter_loaded();
+    if (msg_filter_skip(g_msg_filter, msgid)) return false;
 
     // Action/error severity always interesting
     char sev = msgid.back();
