@@ -528,16 +528,14 @@ int main(int argc, char ** argv) {
     }
 
     if (unique_msgs.empty()) {
-        if (!g_quiet) std::cout << "No interesting messages found in "
-                                << all_messages.size() << " total messages." << std::endl;
+        std::cout << "No interesting messages found in "
+                  << all_messages.size() << " total messages." << std::endl;
         return 0;
     }
 
-    if (!g_quiet) {
-        std::cerr << "Parsed " << all_messages.size() << " messages, "
-                  << interesting.size() << " interesting, "
-                  << unique_msgs.size() << " unique IDs to look up." << std::endl;
-    }
+    std::cerr << "Parsed " << all_messages.size() << " messages, "
+              << interesting.size() << " interesting, "
+              << unique_msgs.size() << " unique IDs to look up." << std::endl;
 
     // Initialize llama.cpp
     llama_log_set(llama_log_callback, NULL);
