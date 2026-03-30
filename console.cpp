@@ -584,7 +584,7 @@ int main(int argc, char ** argv) {
         std::string ibm_path = get_default_ibm_messages_db();
         struct stat ibm_st;
         if (stat(ibm_path.c_str(), &ibm_st) == 0) {
-            if (store_open_readonly_strict(ibm_store, ibm_path)) {
+            if (store_open_readonly(ibm_store, ibm_path)) {
                 has_ibm_store = true;
                 if (!g_quiet) {
                     std::cerr << "IBM messages DB: " << ibm_path
