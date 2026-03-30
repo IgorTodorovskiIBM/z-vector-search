@@ -100,7 +100,7 @@ log() {
 
 run_ingest() {
     log "Starting ingest (window=${WINDOW}m, pcon flags: ${PCON_FLAGS})"
-    "${INGEST_CMD}" --quiet --window "${WINDOW}" ${NO_PREFIX} "${MODEL}" "${STORE}" ${PCON_FLAGS}
+    "${INGEST_CMD}" --window "${WINDOW}" ${NO_PREFIX} "${MODEL}" "${STORE}" ${PCON_FLAGS}
     rc=$?
     if [ $rc -eq 0 ]; then
         log "Ingest complete"

@@ -24,7 +24,7 @@ struct TokenizedChunk {
     std::vector<llama_token> tokens;
 };
 
-static bool g_quiet = false;
+static bool g_quiet = true;
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
@@ -50,8 +50,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
             use_prefix = false;
             arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
-            g_quiet = true;
+        } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
+            g_quiet = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
             top_k = std::atoi(argv[arg_idx + 1]);
@@ -90,7 +90,7 @@ int main(int argc, char ** argv) {
                   << "  Defaults: model=" << get_default_model() << "\n"
                   << "            directory=.\n"
                   << "  Options: --include .txt,.md  --no-prefix  --top-k N\n"
-                  << "           --chunk-size N  --chunk-overlap N  --threads N  --quiet\n";
+                  << "           --chunk-size N  --chunk-overlap N  --threads N  --verbose\n";
         return 1;
     }
 

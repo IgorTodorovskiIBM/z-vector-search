@@ -52,10 +52,10 @@ Once set up, all tools automatically use the knowledge base — no extra flags n
 
 ```bash
 # Search IBM documentation directly
-z-query --quiet "S0C4 protection exception"
+z-query "S0C4 protection exception"
 
 # Enrich live console messages with IBM doc context
-z-console --quiet --pcon -r
+z-console --pcon -r
 ```
 
 **Options:**
@@ -100,7 +100,7 @@ Scanned 15 files -> 8 chunks to encode.
 | `--chunk-overlap N` | Overlap between chunks (default: 64) |
 | `--threads N` | Number of encoding threads (default: 4) |
 | `--source-type TYPE` | Tag chunks with a type (e.g., `ibm_doc`, `runbook`, `source`) |
-| `--quiet` | Suppress progress output |
+| `--verbose` | Show llama.cpp logs and progress details |
 
 ### 2. Querying
 
@@ -123,7 +123,7 @@ The `z-query` tool searches the pre-computed store using vector similarity.
 | `--no-prefix` | Disable `search_query:` prefix (on by default) |
 | `--source-type TYPE` | Filter results by source type |
 | `--json` | Output results as JSON |
-| `--quiet` | Suppress llama.cpp logs |
+| `--verbose` | Show llama.cpp logs |
 
 ### 3. Console RAG (z-console)
 
@@ -172,7 +172,7 @@ pcon -r | ./z-console model.gguf store.db
 | `--source-type TYPE` | Filter results by source type |
 | `--json` | Output as JSON array |
 | `--verbose` | Show all messages, not just high-value ones |
-| `--quiet` | Suppress llama.cpp logs |
+| `--verbose` | Show llama.cpp logs |
 
 The tool automatically filters for high-value messages: ABENDs (IEF), data management errors (IEC), security (ICH/RACF), CICS (DFH), DB2 (DSN), MQ (CSQ), and any message with error (`E`) or action (`A`) severity.
 
@@ -198,7 +198,7 @@ The `z-ingest-console` tool indexes SYSLOG history into the vector store so that
 **Run periodically via cron (incremental — skips already-ingested windows):**
 ```bash
 # Every hour, ingest the last hour of console
-0 * * * * /path/to/z-ingest-console --quiet -l
+0 * * * * /path/to/z-ingest-console -l
 ```
 
 **Options:**
@@ -208,7 +208,7 @@ The `z-ingest-console` tool indexes SYSLOG history into the vector store so that
 | `--window N` | Minutes per chunk (default: 5) |
 | `--threads N` | Encoding threads (default: 4) |
 | `--no-prefix` | Disable `search_document:` prefix (on by default) |
-| `--quiet` | Suppress progress output |
+| `--verbose` | Show llama.cpp logs and progress details |
 
 Pcon flags (`-r`, `-l`, `-d`, `-w`, `-t N`, `-S SYSNAME`, `-A`) are passed through.
 

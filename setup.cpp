@@ -197,7 +197,7 @@ int main(int argc, char **argv) {
         std::cerr << "Everything is already set up in " << get_default_dir() << "/" << std::endl;
     }
     std::cerr << "\nTest with:\n"
-              << "  z-query --quiet \"S0C4 protection exception\"\n"
-              << "  z-console --quiet --pcon -r\n";
+              << "  z-query \"S0C4 protection exception\"\n"
+              << "  z-console --pcon -r\n";
     return 0;
 }

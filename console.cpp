@@ -14,7 +14,7 @@
 #include "msg_filter.h"
 #include "hybrid_search.h"
 
-static bool g_quiet = false;
+static bool g_quiet = true;
 static bool g_verbose = false;
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
@@ -383,8 +383,7 @@ static void print_usage(const char *prog) {
               << "  --no-prefix        Disable search_query: prefix (on by default)\n"
               << "  --source-type TYPE Filter results by source type\n"
               << "  --json             Output as JSON\n"
-              << "  --verbose          Show all parsed messages, not just interesting ones\n"
-              << "  --quiet            Suppress llama.cpp logs\n"
+              << "  --verbose          Show all messages + llama.cpp logs\n"
               << "\nPcon flags (when using --pcon mode):\n"
               << "  -r                 Last 10 minutes (default)\n"
               << "  -l                 Last hour\n"
@@ -403,10 +402,8 @@ int main(int argc, char ** argv) {
     std::string source_type_filter;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--quiet") == 0) {
-            g_quiet = true;
-            arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
+        if (strcmp(argv[arg_idx], "--verbose") == 0) {
+            g_quiet = false;
             g_verbose = true;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--json") == 0) {

@@ -14,7 +14,7 @@
 
 namespace fs = std::filesystem;
 
-static bool g_quiet = false;
+static bool g_quiet = true;
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
@@ -134,8 +134,8 @@ int main(int argc, char ** argv) {
             n_threads = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
             continue;
-        } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
-            g_quiet = true;
+        } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
+            g_quiet = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
             suffixes = parse_suffixes(argv[arg_idx + 1]);
@@ -173,7 +173,7 @@ int main(int argc, char ** argv) {
                   << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
                   << "    --no-prefix            Disable search_document: prefix (on by default)\n"
                   << "    --threads N            Encoding threads (default: 4)\n"
-                  << "    --quiet                Suppress progress output\n"
+                  << "    --verbose              Show llama.cpp logs and progress details\n"
                   << std::endl;
         return 1;
     }

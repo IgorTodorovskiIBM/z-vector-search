@@ -13,7 +13,7 @@
 #include "defaults.h"
 #include "msg_filter.h"
 
-static bool g_quiet = false;
+static bool g_quiet = true;
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
@@ -353,7 +353,7 @@ static void print_usage(const char *prog) {
               << "  --no-prefix        Disable search_document: prefix (on by default)\n"
               << "  --no-filter        Disable message filtering (index everything)\n"
               << "  --filter FILE      Custom filter file (default: " << get_default_filter_path() << ")\n"
-              << "  --quiet            Suppress progress output\n"
+              << "  --verbose          Show llama.cpp logs and progress details\n"
               << "\nPcon flags (passed through to pcon):\n"
               << "  -r                 Last 10 minutes (default)\n"
               << "  -l                 Last hour\n"
@@ -375,8 +375,8 @@ int main(int argc, char ** argv) {
     std::string filter_path;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--quiet") == 0) {
-            g_quiet = true;
+        if (strcmp(argv[arg_idx], "--verbose") == 0) {
+            g_quiet = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
             use_prefix = false;

@@ -11,7 +11,7 @@
 #include "defaults.h"
 #include "hybrid_search.h"
 
-static bool g_quiet = false;
+static bool g_quiet = true;
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
@@ -87,8 +87,8 @@ int main(int argc, char ** argv) {
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--json") == 0) {
             json_output = true;
-        } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
-            g_quiet = true;
+        } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
+            g_quiet = false;
         } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
             use_prefix = false;
         } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
