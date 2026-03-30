@@ -6,4 +6,3 @@ build-test/
 ibm-docs/*.pdf
 ibm-docs/txt/
 ibm-docs/clean/
-ibm-docs/ibm-messages.db
