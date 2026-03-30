@@ -1,5 +1,4 @@
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <cstring>
 #include <cstdio>
@@ -84,43 +83,61 @@ static bool check_and_convert(const std::string &db_path) {
     }
 }
 
-// Copy a file using buffered I/O.
-static bool copy_file(const std::string &src, const std::string &dest) {
-    std::ifstream in(src, std::ios::binary);
-    if (!in) {
-        std::cerr << "Error: cannot read " << src << std::endl;
+// Download a file using curl.
+static const char *MODEL_URL =
+    "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/"
+    "nomic-embed-text-v1.5.Q4_K_M.gguf";
+
+static bool download_file(const std::string &url, const std::string &dest) {
+    std::string tmp = dest + ".tmp";
+    std::string cmd = "curl -fSL --progress-bar -o \"" + tmp + "\" \"" + url + "\"";
+    int rc = system(cmd.c_str());
+    if (rc != 0) {
+        std::cerr << "Error: download failed (exit " << rc << ")" << std::endl;
+        std::cerr << "Make sure 'curl' is installed and you have network access." << std::endl;
+        remove(tmp.c_str());
         return false;
     }
-    std::ofstream out(dest, std::ios::binary);
-    if (!out) {
-        std::cerr << "Error: cannot write " << dest << std::endl;
+
+    struct stat st;
+    if (stat(tmp.c_str(), &st) != 0 || st.st_size == 0) {
+        std::cerr << "Error: downloaded file is empty or missing" << std::endl;
+        remove(tmp.c_str());
         return false;
     }
-    char buf[65536];
-    while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
-        out.write(buf, in.gcount());
+
+    if (rename(tmp.c_str(), dest.c_str()) != 0) {
+        std::cerr << "Error: failed to move " << tmp << " to " << dest << std::endl;
+        remove(tmp.c_str());
+        return false;
     }
-    return out.good();
+
+    std::cerr << "  Downloaded: " << dest << " (" << st.st_size << " bytes)" << std::endl;
+    return true;
 }
 
 int main(int argc, char **argv) {
     std::string source_dir_override;
     bool force = false;
+    bool no_model = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--source-dir") == 0 && i + 1 < argc) {
             source_dir_override = argv[++i];
         } else if (strcmp(argv[i], "--force") == 0) {
             force = true;
+        } else if (strcmp(argv[i], "--no-model") == 0) {
+            no_model = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             std::cerr << "Usage: z-setup [OPTIONS]\n"
                       << "\nSets up the IBM z/OS Messages knowledge base for z-query and z-console.\n"
                       << "Unpacks the pre-built database, converts byte order if needed, and\n"
-                      << "copies the embedding model to ~/.z-vector-search/.\n"
+                      << "downloads the embedding model to ~/.z-vector-search/.\n"
                       << "\nOptions:\n"
                       << "  --source-dir DIR   Directory containing ibm-messages.db.xz.part* files\n"
                       << "                     (default: auto-detect ibm-docs/ relative to binary or CWD)\n"
-                      << "  --force            Re-extract even if files already exist\n"
+                      << "  --no-model         Skip model download\n"
+                      << "  --force            Re-extract and re-download even if files already exist\n"
                       << "  --help             Show this help\n";
             return 0;
         } else {
@@ -159,21 +176,17 @@ int main(int argc, char **argv) {
     // 4. Check endianness and convert if needed
     if (!check_and_convert(db_dest)) return 1;
 
-    // 5. Copy model if needed
+    // 5. Download model if needed
     std::string model_dest = get_default_model();
-    std::string model_src = source_dir + "/nomic-embed-text-v1.5.Q4_K_M.gguf";
-    if (file_exists(model_dest) && !force) {
+    if (no_model) {
+        std::cerr << "Skipping model download (--no-model)." << std::endl;
+    } else if (file_exists(model_dest) && !force) {
         std::cerr << "Embedding model already exists: " << model_dest << std::endl;
-    } else if (file_exists(model_src)) {
-        std::cerr << "Copying embedding model..." << std::endl;
-        if (force && file_exists(model_dest)) remove(model_dest.c_str());
-        if (!copy_file(model_src, model_dest)) return 1;
-        struct stat st;
-        stat(model_dest.c_str(), &st);
-        std::cerr << "  Copied: " << model_dest << " (" << st.st_size << " bytes)" << std::endl;
-        did_something = true;
     } else {
-        std::cerr << "Note: no embedding model found at " << model_src << std::endl;
+        std::cerr << "Downloading embedding model (84 MB)..." << std::endl;
+        if (force && file_exists(model_dest)) remove(model_dest.c_str());
+        if (!download_file(MODEL_URL, model_dest)) return 1;
+        did_something = true;
     }
 
     // 6. Summary

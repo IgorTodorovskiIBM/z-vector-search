@@ -46,7 +46,7 @@ z-setup
 This does three things automatically:
 1. Unpacks the compressed IBM messages database (~160 MB)
 2. Detects and converts byte order if running on z/OS (big-endian)
-3. Copies the embedding model to `~/.z-vector-search/`
+3. Downloads the embedding model from Hugging Face (~84 MB)
 
 Once set up, all tools automatically use the knowledge base — no extra flags needed:
 
@@ -63,7 +63,8 @@ z-console --quiet --prefix --pcon -r
 | Flag | Description |
 |------|-------------|
 | `--source-dir DIR` | Directory containing the packed DB parts (default: auto-detect `ibm-docs/`) |
-| `--force` | Re-extract and overwrite existing files |
+| `--no-model` | Skip model download |
+| `--force` | Re-extract and re-download even if files already exist |
 
 ## How to Use
 
