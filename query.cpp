@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <sys/stat.h>
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
@@ -61,6 +62,8 @@ void print_json(const std::string& query, const std::vector<QueryResult>& result
             std::cout << ",\n      \"julian_date\": \"" << escape_json(r.julian_date) << "\"";
         if (r.msg_count > 0)
             std::cout << ",\n      \"msg_count\": " << r.msg_count;
+        if (!r.store_tag.empty())
+            std::cout << ",\n      \"store\": \"" << escape_json(r.store_tag) << "\"";
         std::cout << "\n    }" << (i == results.size() - 1 ? "" : ",") << "\n";
     }
     std::cout << "  ]\n";
@@ -269,6 +272,24 @@ int main(int argc, char ** argv) {
         }
 
         auto results = store_keyword_query(store, pq.kw, top_k);
+
+        // Search IBM messages DB if available
+        {
+            std::string ibm_path = get_default_ibm_messages_db();
+            struct stat ibm_st;
+            if (stat(ibm_path.c_str(), &ibm_st) == 0) {
+                StoreDB ibm_store;
+                if (store_open_readonly_strict(ibm_store, ibm_path)) {
+                    auto ibm_results = store_keyword_query(ibm_store, pq.kw, top_k);
+                    for (auto &r : ibm_results) {
+                        r.store_tag = "ibm_doc";
+                        results.push_back(std::move(r));
+                    }
+                }
+            }
+        }
+        if ((int)results.size() > top_k) results.resize(top_k);
+
         int total = store_count(store);
 
         if (json_output) {
@@ -353,16 +374,42 @@ int main(int argc, char ** argv) {
                   << ", " << query_vec[2] << ", " << query_vec[3] << std::endl;
     }
 
+    // Auto-discover IBM messages knowledge base
+    StoreDB ibm_store;
+    bool has_ibm_store = false;
+    {
+        std::string ibm_path = get_default_ibm_messages_db();
+        struct stat ibm_st;
+        if (stat(ibm_path.c_str(), &ibm_st) == 0) {
+            if (store_open_readonly_strict(ibm_store, ibm_path)) {
+                has_ibm_store = true;
+            }
+        }
+    }
+
     std::vector<QueryResult> results;
 
     if (pq.mode == SEARCH_HYBRID) {
         // Run both keyword and semantic, merge via RRF
         auto kw_results = store_keyword_query(store, pq.kw, top_k * 2);
         auto sem_results = store_query(store, query_vec, top_k * 2, source_type_filter);
+        if (has_ibm_store) {
+            auto ibm_kw = store_keyword_query(ibm_store, pq.kw, top_k);
+            for (auto &r : ibm_kw) { r.store_tag = "ibm_doc"; r.rowid += INT64_MAX/2; kw_results.push_back(std::move(r)); }
+            auto ibm_sem = store_query(ibm_store, query_vec, top_k, "");
+            for (auto &r : ibm_sem) { r.store_tag = "ibm_doc"; r.rowid += INT64_MAX/2; sem_results.push_back(std::move(r)); }
+        }
         results = rrf_merge(kw_results, sem_results, top_k);
     } else {
         // Pure semantic
         results = store_query(store, query_vec, top_k, source_type_filter);
+        if (has_ibm_store) {
+            auto ibm_results = store_query(ibm_store, query_vec, top_k, "");
+            for (auto &r : ibm_results) { r.store_tag = "ibm_doc"; results.push_back(std::move(r)); }
+            // Sort by distance and trim
+            std::sort(results.begin(), results.end(), [](const QueryResult &a, const QueryResult &b) { return a.distance < b.distance; });
+            if ((int)results.size() > top_k) results.resize(top_k);
+        }
     }
 
     if (json_output) {
@@ -376,6 +423,7 @@ int main(int argc, char ** argv) {
             auto &r = results[i];
             std::cout << "[" << i+1 << "]";
             if (r.distance > 0) std::cout << " dist=" << r.distance;
+            if (!r.store_tag.empty()) std::cout << " [" << r.store_tag << "]";
             std::cout << " | " << r.filename;
             if (!r.msgid.empty()) std::cout << " | msgid: " << r.msgid;
             if (!r.severity.empty() && r.severity != " ") std::cout << " | sev: " << r.severity;
