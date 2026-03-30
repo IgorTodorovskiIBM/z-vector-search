@@ -70,6 +70,7 @@ void print_json(const std::string& query, const std::vector<QueryResult>& result
 int main(int argc, char ** argv) {
     bool json_output = false;
     bool use_prefix = false;
+    bool convert_endian = false;
     int top_k = 3;
     int arg_idx = 1;
     std::string source_type_filter;
@@ -123,6 +124,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--window") == 0 && arg_idx + 1 < argc) {
             opt_timeline_window = std::atoi(argv[arg_idx + 1]);
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--convert-endian") == 0) {
+            convert_endian = true;
         } else {
             break;
         }
@@ -133,7 +136,7 @@ int main(int argc, char ** argv) {
     bool has_structured_flags = !opt_msgid.empty() || !opt_job.empty() || !opt_sys.empty() ||
                                  opt_severity != '\0' || !opt_date.empty() || !opt_timeline.empty();
 
-    if (argc - arg_idx < 1 && !has_structured_flags) {
+    if (argc - arg_idx < 1 && !has_structured_flags && !convert_endian) {
         std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] [store.db] <query>\n"
                   << "\n  Defaults: model=" << get_default_model() << "\n"
                   << "            store=" << get_default_store() << "\n"
@@ -152,6 +155,8 @@ int main(int argc, char ** argv) {
                   << "    --timeline HH:MM   Show chunks around this time\n"
                   << "    --window N         Timeline window in minutes (default: 10)\n"
                   << "    --mode MODE        Force: auto|semantic|keyword|hybrid\n"
+                  << "\n  Utilities:\n"
+                  << "    --convert-endian   Swap vector byte order (use once after moving DB across platforms)\n"
                   << std::endl;
         return 1;
     }
@@ -177,6 +182,23 @@ int main(int argc, char ** argv) {
     // remaining == 0 is valid when using structured flags
 
     llama_log_set(llama_log_callback, NULL);
+
+    // --- Convert endian: one-time operation, no model needed ---
+    if (convert_endian) {
+        // For --convert-endian, the single positional arg is the store path
+        std::string convert_path = store_path;
+        if (convert_path == get_default_store() && !query.empty()) {
+            convert_path = query;  // single arg was parsed as query, use it as store
+        }
+        StoreDB store;
+        if (!store_open_readonly(store, convert_path)) {
+            std::cerr << "Error: failed to open store " << convert_path << std::endl;
+            return 1;
+        }
+        std::cerr << "Converting vector byte order in " << convert_path << "..." << std::endl;
+        bool ok = store_convert_vectors(store);
+        return ok ? 0 : 1;
+    }
 
     // --- Determine search mode ---
     // Timeline mode is special: pure SQL, no embedding needed

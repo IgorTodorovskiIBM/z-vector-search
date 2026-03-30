@@ -14,20 +14,9 @@
 #include "vendor/sqlite3.h"
 #include "vendor/sqlite-vec.h"
 
-// sqlite-vec stores float vectors as raw blobs in native byte order.
-// On big-endian (z/OS), we must swap to/from little-endian so that
-// databases are portable across platforms.
-#if defined(__MVS__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-  #define STORE_VEC_NEEDS_BSWAP 1
-#else
-  #define STORE_VEC_NEEDS_BSWAP 0
-#endif
-
-#if STORE_VEC_NEEDS_BSWAP
+// Byte-swap utility for converting vector DBs between endiannesses.
 static inline uint32_t store_bswap32(uint32_t x) {
-#if defined(__MVS__)
-    return __builtin_bswap32(x);
-#elif defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
     return __builtin_bswap32(x);
 #else
     return ((x & 0xFF000000u) >> 24) |
@@ -36,22 +25,6 @@ static inline uint32_t store_bswap32(uint32_t x) {
            ((x & 0x000000FFu) << 24);
 #endif
 }
-
-// Swap a vector of floats between native (big-endian) and little-endian.
-// This is its own inverse: LE→BE and BE→LE are the same operation.
-static inline std::vector<float> store_vec_bswap(const std::vector<float> &v) {
-    std::vector<float> out(v.size());
-    const uint32_t *src = reinterpret_cast<const uint32_t *>(v.data());
-    uint32_t *dst = reinterpret_cast<uint32_t *>(out.data());
-    for (size_t i = 0; i < v.size(); ++i) {
-        dst[i] = store_bswap32(src[i]);
-    }
-    return out;
-}
-#else
-// No-op on little-endian platforms
-static inline const std::vector<float> &store_vec_bswap(const std::vector<float> &v) { return v; }
-#endif
 
 struct StoreDB {
     sqlite3 *db = nullptr;
@@ -216,6 +189,75 @@ inline bool store_open_readonly(StoreDB &store, const std::string &path) {
     return true;
 }
 
+// Byte-swap all float vectors in the vec_chunks table.
+// sqlite-vec interprets blobs in native byte order, so a DB built on
+// little-endian (macOS) has LE floats that read as garbage on big-endian
+// (z/OS). Run this once after transferring a DB across platforms.
+// The operation is its own inverse (swap again to convert back).
+inline bool store_convert_vectors(StoreDB &store) {
+    const char *sql_read = "SELECT rowid, embedding FROM vec_chunks;";
+    sqlite3_stmt *rstmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql_read, -1, &rstmt, nullptr) != SQLITE_OK) {
+        std::cerr << "convert: prepare read: " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+
+    struct VecRow { int64_t rowid; std::vector<uint8_t> blob; };
+    std::vector<VecRow> rows;
+
+    while (sqlite3_step(rstmt) == SQLITE_ROW) {
+        VecRow r;
+        r.rowid = sqlite3_column_int64(rstmt, 0);
+        int nbytes = sqlite3_column_bytes(rstmt, 1);
+        const uint8_t *data = (const uint8_t *)sqlite3_column_blob(rstmt, 1);
+        if (data && nbytes > 0) {
+            r.blob.assign(data, data + nbytes);
+            rows.push_back(std::move(r));
+        }
+    }
+    sqlite3_finalize(rstmt);
+
+    if (rows.empty()) {
+        std::cerr << "convert: no vectors found" << std::endl;
+        return false;
+    }
+
+    // Swap each float in each blob
+    for (auto &r : rows) {
+        uint32_t *floats = reinterpret_cast<uint32_t *>(r.blob.data());
+        size_t n_floats = r.blob.size() / sizeof(uint32_t);
+        for (size_t i = 0; i < n_floats; ++i) {
+            floats[i] = store_bswap32(floats[i]);
+        }
+    }
+
+    // Write back
+    const char *sql_update = "UPDATE vec_chunks SET embedding = ? WHERE rowid = ?;";
+    sqlite3_stmt *wstmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql_update, -1, &wstmt, nullptr) != SQLITE_OK) {
+        std::cerr << "convert: prepare write: " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+
+    sqlite3_exec(store.db, "BEGIN;", nullptr, nullptr, nullptr);
+    int converted = 0;
+    for (auto &r : rows) {
+        sqlite3_bind_blob(wstmt, 1, r.blob.data(), r.blob.size(), SQLITE_STATIC);
+        sqlite3_bind_int64(wstmt, 2, r.rowid);
+        if (sqlite3_step(wstmt) != SQLITE_DONE) {
+            std::cerr << "convert: update rowid " << r.rowid << ": " << sqlite3_errmsg(store.db) << std::endl;
+        } else {
+            converted++;
+        }
+        sqlite3_reset(wstmt);
+    }
+    sqlite3_exec(store.db, "COMMIT;", nullptr, nullptr, nullptr);
+    sqlite3_finalize(wstmt);
+
+    std::cerr << "Converted " << converted << " vectors (" << rows.size() << " total)" << std::endl;
+    return converted == (int)rows.size();
+}
+
 // Get a map of base_filename -> mtime for all indexed files.
 // Strips " [chunk N]" suffixes so the caller can compare against filesystem paths.
 inline std::unordered_map<std::string, int64_t> store_get_indexed_files(StoreDB &store) {
@@ -311,9 +353,7 @@ inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
     sqlite3_finalize(stmt);
     int64_t rowid = sqlite3_last_insert_rowid(store.db);
 
-    // Insert embedding into vec0 table
-    // On big-endian, swap floats to little-endian for portable storage
-    const auto &vec_le = store_vec_bswap(embedding);
+    // Insert embedding into vec0 table (native byte order)
     const char *sql_vec = "INSERT INTO vec_chunks(rowid, embedding) VALUES(?, ?);";
     sqlite3_stmt *vstmt = nullptr;
     if (sqlite3_prepare_v2(store.db, sql_vec, -1, &vstmt, nullptr) != SQLITE_OK) {
@@ -321,7 +361,7 @@ inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
         return -1;
     }
     sqlite3_bind_int64(vstmt, 1, rowid);
-    sqlite3_bind_blob(vstmt, 2, vec_le.data(), vec_le.size() * sizeof(float), SQLITE_STATIC);
+    sqlite3_bind_blob(vstmt, 2, embedding.data(), embedding.size() * sizeof(float), SQLITE_STATIC);
     if (sqlite3_step(vstmt) != SQLITE_DONE) {
         std::cerr << "insert vec_chunks: " << sqlite3_errmsg(store.db) << std::endl;
         sqlite3_finalize(vstmt);
@@ -392,10 +432,8 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         return results;
     }
 
-    // On big-endian, swap query vector to little-endian to match stored vectors
-    const auto &q_le = store_vec_bswap(query_embedding);
-    sqlite3_bind_blob(stmt, 1, q_le.data(),
-                      q_le.size() * sizeof(float), SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 1, query_embedding.data(),
+                      query_embedding.size() * sizeof(float), SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, fetch_k);
 
     auto col_str = [](sqlite3_stmt *s, int col) -> std::string {
