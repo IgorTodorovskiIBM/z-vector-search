@@ -523,6 +523,15 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
     }
     // Process first row if we got one, then loop for the rest
     while (step_rc == SQLITE_ROW) {
+        // Skip internal metadata rows (e.g. high-water mark)
+        {
+            std::string src = col_str(stmt, 4);
+            if (src == "operlog_meta") {
+                step_rc = sqlite3_step(stmt);
+                continue;
+            }
+        }
+
         // Post-filter by source_type if requested
         if (!source_type_filter.empty()) {
             std::string src = col_str(stmt, 4);
@@ -589,7 +598,8 @@ inline std::vector<QueryResult> store_keyword_query(StoreDB &store,
     // Build WHERE clauses dynamically
     std::string sql = "SELECT id, filename, snippet, source_type, "
                       "msgid, severity, jobname, sysname, ts_start, ts_end, "
-                      "julian_date, msg_count, full_text FROM chunks WHERE 1=1";
+                      "julian_date, msg_count, full_text FROM chunks "
+                      "WHERE source_type != 'operlog_meta'";
     std::vector<std::string> binds;
 
     if (!kq.msgid_pattern.empty()) {

@@ -35,7 +35,7 @@ int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
     bool use_prefix = true;
-    int top_k = 3;
+    int top_k = 5;
     int chunk_size = 256;
     int chunk_overlap = 64;
     int n_threads = 4;

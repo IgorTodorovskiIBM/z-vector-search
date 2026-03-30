@@ -74,7 +74,7 @@ int main(int argc, char ** argv) {
     bool json_output = false;
     bool use_prefix = true;
     bool convert_endian = false;
-    int top_k = 3;
+    int top_k = 5;
     int arg_idx = 1;
     std::string source_type_filter;
     std::string force_mode;         // "", "auto", "semantic", "keyword", "hybrid"

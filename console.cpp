@@ -395,7 +395,7 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char ** argv) {
     int arg_idx = 1;
-    int top_k = 3;
+    int top_k = 5;
     bool use_prefix = true;
     bool json_output = false;
     bool pcon_mode = false;
