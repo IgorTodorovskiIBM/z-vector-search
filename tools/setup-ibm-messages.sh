@@ -105,11 +105,11 @@ echo "Using model:   $MODEL_PATH"
 echo "This will take several minutes..."
 echo ""
 
-"$INDEX_BIN" --ibm-messages --source-type ibm_doc "$MODEL_PATH" "$TMPDIR_MSGS" "$STORE_PATH"
+"$INDEX_BIN" --ibm-messages --prefix --source-type ibm_doc "$MODEL_PATH" "$TMPDIR_MSGS" "$STORE_PATH"
 
 echo ""
 echo "Done! IBM Messages knowledge base is ready at: $STORE_PATH"
 echo ""
 echo "Test it with:"
-echo "  z-query --quiet $MODEL_PATH $STORE_PATH \"what causes an S0C4 abend\""
+echo "  z-query --quiet --prefix $MODEL_PATH $STORE_PATH \"what causes an S0C4 abend\""
 echo "  z-query --quiet --mode keyword --msgid \"IEF*\" $MODEL_PATH $STORE_PATH \"\""
