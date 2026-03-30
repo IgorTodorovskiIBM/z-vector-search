@@ -153,6 +153,8 @@ def split_0cx_entry(code_id, text):
             continue
 
         parts = [f"System abend code {subcode} (S{subcode})"]
+        if shared_header:
+            parts.append(shared_header)
         if sub_text_body:
             parts.append(sub_text_body)
         if shared_footer:
