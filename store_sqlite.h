@@ -222,6 +222,14 @@ inline bool store_convert_vectors(StoreDB &store) {
         return false;
     }
 
+    // Show first vector's first 4 floats before swap for diagnostics
+    if (!rows.empty() && rows[0].blob.size() >= 16) {
+        float f[4];
+        memcpy(f, rows[0].blob.data(), 16);
+        std::cerr << "  Before swap [rowid " << rows[0].rowid << "]: "
+                  << f[0] << ", " << f[1] << ", " << f[2] << ", " << f[3] << std::endl;
+    }
+
     // Swap each float in each blob
     for (auto &r : rows) {
         uint32_t *floats = reinterpret_cast<uint32_t *>(r.blob.data());
@@ -231,28 +239,50 @@ inline bool store_convert_vectors(StoreDB &store) {
         }
     }
 
-    // Write back
-    const char *sql_update = "UPDATE vec_chunks SET embedding = ? WHERE rowid = ?;";
-    sqlite3_stmt *wstmt = nullptr;
-    if (sqlite3_prepare_v2(store.db, sql_update, -1, &wstmt, nullptr) != SQLITE_OK) {
-        std::cerr << "convert: prepare write: " << sqlite3_errmsg(store.db) << std::endl;
+    // Show same vector after swap
+    if (!rows.empty() && rows[0].blob.size() >= 16) {
+        float f[4];
+        memcpy(f, rows[0].blob.data(), 16);
+        std::cerr << "  After swap  [rowid " << rows[0].rowid << "]: "
+                  << f[0] << ", " << f[1] << ", " << f[2] << ", " << f[3] << std::endl;
+    }
+
+    // Write back using DELETE + INSERT (vec0 virtual tables may not support UPDATE)
+    const char *sql_del = "DELETE FROM vec_chunks WHERE rowid = ?;";
+    const char *sql_ins = "INSERT INTO vec_chunks(rowid, embedding) VALUES(?, ?);";
+    sqlite3_stmt *dstmt = nullptr;
+    sqlite3_stmt *istmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql_del, -1, &dstmt, nullptr) != SQLITE_OK) {
+        std::cerr << "convert: prepare delete: " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+    if (sqlite3_prepare_v2(store.db, sql_ins, -1, &istmt, nullptr) != SQLITE_OK) {
+        std::cerr << "convert: prepare insert: " << sqlite3_errmsg(store.db) << std::endl;
+        sqlite3_finalize(dstmt);
         return false;
     }
 
     sqlite3_exec(store.db, "BEGIN;", nullptr, nullptr, nullptr);
     int converted = 0;
     for (auto &r : rows) {
-        sqlite3_bind_blob(wstmt, 1, r.blob.data(), r.blob.size(), SQLITE_STATIC);
-        sqlite3_bind_int64(wstmt, 2, r.rowid);
-        if (sqlite3_step(wstmt) != SQLITE_DONE) {
-            std::cerr << "convert: update rowid " << r.rowid << ": " << sqlite3_errmsg(store.db) << std::endl;
+        // Delete old vector
+        sqlite3_bind_int64(dstmt, 1, r.rowid);
+        sqlite3_step(dstmt);
+        sqlite3_reset(dstmt);
+
+        // Insert swapped vector
+        sqlite3_bind_int64(istmt, 1, r.rowid);
+        sqlite3_bind_blob(istmt, 2, r.blob.data(), r.blob.size(), SQLITE_STATIC);
+        if (sqlite3_step(istmt) != SQLITE_DONE) {
+            std::cerr << "convert: insert rowid " << r.rowid << ": " << sqlite3_errmsg(store.db) << std::endl;
         } else {
             converted++;
         }
-        sqlite3_reset(wstmt);
+        sqlite3_reset(istmt);
     }
     sqlite3_exec(store.db, "COMMIT;", nullptr, nullptr, nullptr);
-    sqlite3_finalize(wstmt);
+    sqlite3_finalize(dstmt);
+    sqlite3_finalize(istmt);
 
     std::cerr << "Converted " << converted << " vectors (" << rows.size() << " total)" << std::endl;
     return converted == (int)rows.size();
@@ -441,11 +471,20 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         return v ? v : "";
     };
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    int step_rc = sqlite3_step(stmt);
+    if (step_rc != SQLITE_ROW) {
+        std::cerr << "vec query: step returned " << step_rc
+                  << " (" << sqlite3_errmsg(store.db) << ")" << std::endl;
+    }
+    // Process first row if we got one, then loop for the rest
+    while (step_rc == SQLITE_ROW) {
         // Post-filter by source_type if requested
         if (!source_type_filter.empty()) {
             std::string src = col_str(stmt, 4);
-            if (src != source_type_filter) continue;
+            if (src != source_type_filter) {
+                step_rc = sqlite3_step(stmt);
+                continue;
+            }
         }
 
         QueryResult qr;
@@ -466,6 +505,7 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         results.push_back(std::move(qr));
 
         if ((int)results.size() >= top_k) break;
+        step_rc = sqlite3_step(stmt);
     }
     sqlite3_finalize(stmt);
     return results;

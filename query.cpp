@@ -348,6 +348,11 @@ int main(int argc, char ** argv) {
     std::vector<float> query_vec(q_emb, q_emb + n_embd);
     normalize_embedding(query_vec);
 
+    if (!g_quiet) {
+        std::cerr << "Query vector (first 4): " << query_vec[0] << ", " << query_vec[1]
+                  << ", " << query_vec[2] << ", " << query_vec[3] << std::endl;
+    }
+
     std::vector<QueryResult> results;
 
     if (pq.mode == SEARCH_HYBRID) {
