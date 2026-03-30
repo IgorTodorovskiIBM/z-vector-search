@@ -99,4 +99,12 @@ target_link_libraries(z-console ${ALL_LIBS})
 add_executable(z-ingest-console ingest_console.cpp)
 target_link_libraries(z-ingest-console ${ALL_LIBS})
 
-install(TARGETS z-index z-query z-vector-search z-console z-ingest-console DESTINATION bin)
+# z-setup only needs sqlite (no llama.cpp)
+set(SETUP_LIBS sqlite3 sqlite-vec)
+if(LIB_ZOSLIB)
+    list(APPEND SETUP_LIBS ${LIB_ZOSLIB})
+endif()
+add_executable(z-setup setup.cpp)
+target_link_libraries(z-setup ${SETUP_LIBS})
+
+install(TARGETS z-index z-query z-vector-search z-console z-ingest-console z-setup DESTINATION bin)

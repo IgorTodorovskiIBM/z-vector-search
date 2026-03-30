@@ -34,6 +34,37 @@ cmake .. \
 make
 ```
 
+## Quick Start: IBM Messages Knowledge Base
+
+The project ships with a pre-built knowledge base covering ~24,000 IBM z/OS messages (MVS, RACF, system codes). Run `z-setup` once to install it:
+
+```bash
+# From the project root after building
+z-setup
+```
+
+This does three things automatically:
+1. Unpacks the compressed IBM messages database (~160 MB)
+2. Detects and converts byte order if running on z/OS (big-endian)
+3. Copies the embedding model to `~/.z-vector-search/`
+
+Once set up, all tools automatically use the knowledge base — no extra flags needed:
+
+```bash
+# Search IBM documentation directly
+z-query --quiet --prefix "S0C4 protection exception"
+
+# Enrich live console messages with IBM doc context
+z-console --quiet --prefix --pcon -r
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--source-dir DIR` | Directory containing the packed DB parts (default: auto-detect `ibm-docs/`) |
+| `--force` | Re-extract and overwrite existing files |
+
 ## How to Use
 
 Semantic search is performed in two steps: **Indexing** and **Querying**.
@@ -96,6 +127,8 @@ The `z-query` tool searches the pre-computed store using vector similarity.
 ### 3. Console RAG (z-console)
 
 The `z-console` tool enriches z/OS operator console messages with context from the vector store. It integrates with `pcon` to read SYSLOG, parses message IDs, filters for high-value messages (ABENDs, errors, action messages), and performs RAG lookups for each.
+
+If the IBM messages knowledge base is installed (via `z-setup`), z-console automatically searches it alongside the operational store. IBM documentation results appear tagged `[ibm_doc]` and include message explanations, system actions, and operator responses. No extra flags needed — if `~/.z-vector-search/ibm-messages.db` exists, it is used.
 
 **Single message lookup:**
 ```bash
@@ -226,12 +259,13 @@ All tools default to `$HOME/.z-vector-search/` for model and store paths:
 |------|-----------------|
 | Model | `$HOME/.z-vector-search/model.gguf` |
 | Store | `$HOME/.z-vector-search/store.db` |
+| IBM Messages DB | `$HOME/.z-vector-search/ibm-messages.db` |
 
 This means most commands can be run with minimal arguments:
 
 ```bash
-# Setup: copy your model to the default location
-cp nomic-embed-text-v1.5.Q4_K_M.gguf ~/.z-vector-search/model.gguf
+# One-time setup: unpack IBM docs + model
+z-setup
 
 # Index a directory (uses default model and store)
 ./z-index ./my_docs

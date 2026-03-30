@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
+#include <cmath>
 #include <iostream>
 
 #define SQLITE_CORE
@@ -187,6 +188,49 @@ inline bool store_open_readonly(StoreDB &store, const std::string &path) {
 
     store_migrate(store.db);
     return true;
+}
+
+// Open a store in true read-only mode (no WAL creation, no schema changes).
+// Safe for concurrent access to static databases like the IBM messages DB.
+inline bool store_open_readonly_strict(StoreDB &store, const std::string &path) {
+    store.n_embd = 0;
+    int rc = sqlite3_open_v2(path.c_str(), &store.db, SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "sqlite3_open (readonly): " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+    char *vec_err = nullptr;
+    sqlite3_vec_init(store.db, &vec_err, nullptr);
+    if (vec_err) sqlite3_free(vec_err);
+    return true;
+}
+
+// Check if vectors in the store are in native byte order.
+// Returns: 1 = native (no conversion needed), 0 = foreign (needs conversion), -1 = no vectors
+inline int store_check_endian(StoreDB &store) {
+    const char *sql = "SELECT embedding FROM vec_chunks LIMIT 1;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+
+    int result = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int nbytes = sqlite3_column_bytes(stmt, 0);
+        const uint8_t *data = (const uint8_t *)sqlite3_column_blob(stmt, 0);
+        if (data && nbytes >= 16) {
+            float f[4];
+            memcpy(f, data, 16);
+            bool all_valid = true;
+            for (int i = 0; i < 4; i++) {
+                if (std::isnan(f[i]) || std::isinf(f[i]) || fabsf(f[i]) > 2.0f) {
+                    all_valid = false;
+                    break;
+                }
+            }
+            result = all_valid ? 1 : 0;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 // Byte-swap all float vectors in the vec_chunks table.
@@ -433,6 +477,7 @@ struct QueryResult {
     std::string ts_end;
     std::string julian_date;
     int msg_count = 0;
+    std::string store_tag;    // which store this came from (e.g. "ibm_doc")
 };
 
 // Query for top-k most similar chunks to the given embedding.

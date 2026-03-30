@@ -23,6 +23,10 @@ inline std::string get_default_model() {
     return get_default_dir() + "/model.gguf";
 }
 
+inline std::string get_default_ibm_messages_db() {
+    return get_default_dir() + "/ibm-messages.db";
+}
+
 // Ensure the default directory exists. Returns true on success.
 inline bool ensure_default_dir() {
     std::string dir = get_default_dir();

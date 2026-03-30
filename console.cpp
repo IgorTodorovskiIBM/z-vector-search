@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <algorithm>
+#include <sys/stat.h>
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
@@ -576,6 +577,23 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Auto-discover IBM messages knowledge base
+    StoreDB ibm_store;
+    bool has_ibm_store = false;
+    {
+        std::string ibm_path = get_default_ibm_messages_db();
+        struct stat ibm_st;
+        if (stat(ibm_path.c_str(), &ibm_st) == 0) {
+            if (store_open_readonly_strict(ibm_store, ibm_path)) {
+                has_ibm_store = true;
+                if (!g_quiet) {
+                    std::cerr << "IBM messages DB: " << ibm_path
+                              << " (" << store_count(ibm_store) << " chunks)" << std::endl;
+                }
+            }
+        }
+    }
+
     // Process each unique message
     if (json_output) std::cout << "[\n";
 
@@ -626,6 +644,26 @@ int main(int argc, char ** argv) {
 
         auto sem_results = store_query(store, query_vec, top_k, source_type_filter);
 
+        // Search IBM messages knowledge base if available
+        if (has_ibm_store) {
+            if (!msg.msgid.empty()) {
+                KeywordQuery kq_ibm;
+                kq_ibm.msgid_pattern = msg.msgid;
+                auto ibm_kw = store_keyword_query(ibm_store, kq_ibm, top_k);
+                for (auto &r : ibm_kw) {
+                    r.store_tag = "ibm_doc";
+                    r.rowid += INT64_MAX / 2;
+                    kw_results.push_back(std::move(r));
+                }
+            }
+            auto ibm_sem = store_query(ibm_store, query_vec, top_k, "");
+            for (auto &r : ibm_sem) {
+                r.store_tag = "ibm_doc";
+                r.rowid += INT64_MAX / 2;
+                sem_results.push_back(std::move(r));
+            }
+        }
+
         // Merge via RRF if we have both, otherwise use whichever has results
         std::vector<QueryResult> results;
         if (!kw_results.empty() && !sem_results.empty()) {
@@ -657,6 +695,8 @@ int main(int argc, char ** argv) {
                     std::cout << ",\n        \"msgid\": \"" << escape_json(r.msgid) << "\"";
                 if (!r.ts_start.empty())
                     std::cout << ",\n        \"ts_start\": \"" << escape_json(r.ts_start) << "\"";
+                if (!r.store_tag.empty())
+                    std::cout << ",\n        \"store\": \"" << escape_json(r.store_tag) << "\"";
                 std::cout << "\n      }" << (i == results.size() - 1 ? "" : ",") << "\n";
             }
             std::cout << "    ]\n";
@@ -684,7 +724,8 @@ int main(int argc, char ** argv) {
                 for (size_t i = 0; i < results.size(); i++) {
                     auto &r = results[i];
                     std::cout << "  [" << i + 1 << "]";
-                    if (!r.source_type.empty()) std::cout << " [" << r.source_type << "]";
+                    if (!r.store_tag.empty()) std::cout << " [" << r.store_tag << "]";
+                    else if (!r.source_type.empty()) std::cout << " [" << r.source_type << "]";
                     std::cout << " " << r.filename;
                     if (r.distance > 0) std::cout << " (dist: " << r.distance << ")";
                     if (!r.ts_start.empty()) std::cout << " " << r.ts_start;
