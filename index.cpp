@@ -122,7 +122,7 @@ static std::vector<TokenizedChunk> split_ibm_messages(const std::string &content
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
-    bool use_prefix = false;
+    bool use_prefix = true;
     bool ibm_messages = false;
     int chunk_size = 256;
     int chunk_overlap = 64;
@@ -140,8 +140,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
             suffixes = parse_suffixes(argv[arg_idx + 1]);
             arg_idx += 2;
-        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
-            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
+            use_prefix = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--chunk-size") == 0 && arg_idx + 1 < argc) {
             chunk_size = std::atoi(argv[arg_idx + 1]);
@@ -171,7 +171,7 @@ int main(int argc, char ** argv) {
                   << "    --include .txt,.md     File extensions to index\n"
                   << "    --chunk-size N         Tokens per chunk (default: 256)\n"
                   << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
-                  << "    --prefix               Add search_document: prefix\n"
+                  << "    --no-prefix            Disable search_document: prefix (on by default)\n"
                   << "    --threads N            Encoding threads (default: 4)\n"
                   << "    --quiet                Suppress progress output\n"
                   << std::endl;

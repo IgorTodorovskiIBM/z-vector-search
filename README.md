@@ -52,10 +52,10 @@ Once set up, all tools automatically use the knowledge base — no extra flags n
 
 ```bash
 # Search IBM documentation directly
-z-query --quiet --prefix "S0C4 protection exception"
+z-query --quiet "S0C4 protection exception"
 
 # Enrich live console messages with IBM doc context
-z-console --quiet --prefix --pcon -r
+z-console --quiet --pcon -r
 ```
 
 **Options:**
@@ -95,7 +95,7 @@ Scanned 15 files -> 8 chunks to encode.
 | Flag | Description |
 |------|-------------|
 | `--include .txt,.md,.cpp` | Comma-separated file suffixes to index (default: `.txt,.md`) |
-| `--prefix` | Add `search_document:` prefix for asymmetric embedding models |
+| `--no-prefix` | Disable `search_document:` prefix (on by default) |
 | `--chunk-size N` | Tokens per chunk (default: 256) |
 | `--chunk-overlap N` | Overlap between chunks (default: 64) |
 | `--threads N` | Number of encoding threads (default: 4) |
@@ -120,7 +120,7 @@ The `z-query` tool searches the pre-computed store using vector similarity.
 | Flag | Description |
 |------|-------------|
 | `--top-k N` | Number of results to return (default: 3) |
-| `--prefix` | Add `search_query:` prefix for asymmetric embedding models |
+| `--no-prefix` | Disable `search_query:` prefix (on by default) |
 | `--source-type TYPE` | Filter results by source type |
 | `--json` | Output results as JSON |
 | `--quiet` | Suppress llama.cpp logs |
@@ -168,7 +168,7 @@ pcon -r | ./z-console model.gguf store.db
 | Flag | Description |
 |------|-------------|
 | `--top-k N` | Results per message (default: 3) |
-| `--prefix` | Use `search_query:` prefix |
+| `--no-prefix` | Disable `search_query:` prefix (on by default) |
 | `--source-type TYPE` | Filter results by source type |
 | `--json` | Output as JSON array |
 | `--verbose` | Show all messages, not just high-value ones |
@@ -207,7 +207,7 @@ The `z-ingest-console` tool indexes SYSLOG history into the vector store so that
 |------|-------------|
 | `--window N` | Minutes per chunk (default: 5) |
 | `--threads N` | Encoding threads (default: 4) |
-| `--prefix` | Add `search_document:` prefix |
+| `--no-prefix` | Disable `search_document:` prefix (on by default) |
 | `--quiet` | Suppress progress output |
 
 Pcon flags (`-r`, `-l`, `-d`, `-w`, `-t N`, `-S SYSNAME`, `-A`) are passed through.
@@ -247,7 +247,7 @@ The `z-console-daemon.sh` script runs `z-ingest-console` in a loop, continuously
 | `--window N` | Minutes per chunk (default: 5) |
 | `--model PATH` | Path to model file |
 | `--store PATH` | Path to store database |
-| `--prefix` | Use `search_document:` prefix |
+| `--no-prefix` | Disable `search_document:` prefix (on by default) |
 | `--pcon-flags F` | Extra pcon flags (default: `-r`) |
 | `--once` | Run once and exit |
 | `--pidfile PATH` | Write PID for service management |

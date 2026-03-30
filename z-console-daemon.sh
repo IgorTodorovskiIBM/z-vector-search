@@ -9,7 +9,7 @@
 #   --window N       Minutes per chunk (passed to z-ingest-console, default: 5)
 #   --model PATH     Path to model.gguf (default: $HOME/.z-vector-search/model.gguf)
 #   --store PATH     Path to store.db  (default: $HOME/.z-vector-search/store.db)
-#   --prefix         Use search_document: prefix
+#   --no-prefix      Disable search_document: prefix (on by default)
 #   --pcon-flags F   Extra pcon flags (default: -r)
 #   --once           Run once and exit (useful for cron)
 #   --pidfile PATH   Write PID to file for service management
@@ -35,7 +35,7 @@ INTERVAL=300
 WINDOW=5
 MODEL="${DEFAULT_DIR}/model.gguf"
 STORE="${DEFAULT_DIR}/store.db"
-PREFIX=""
+NO_PREFIX=""
 PCON_FLAGS="-r"
 ONCE=0
 PIDFILE=""
@@ -47,7 +47,7 @@ while [ $# -gt 0 ]; do
         --window)    WINDOW="$2"; shift 2;;
         --model)     MODEL="$2"; shift 2;;
         --store)     STORE="$2"; shift 2;;
-        --prefix)    PREFIX="--prefix"; shift;;
+        --no-prefix) NO_PREFIX="--no-prefix"; shift;;
         --pcon-flags) PCON_FLAGS="$2"; shift 2;;
         --once)      ONCE=1; shift;;
         --pidfile)   PIDFILE="$2"; shift 2;;
@@ -100,7 +100,7 @@ log() {
 
 run_ingest() {
     log "Starting ingest (window=${WINDOW}m, pcon flags: ${PCON_FLAGS})"
-    "${INGEST_CMD}" --quiet --window "${WINDOW}" ${PREFIX} "${MODEL}" "${STORE}" ${PCON_FLAGS}
+    "${INGEST_CMD}" --quiet --window "${WINDOW}" ${NO_PREFIX} "${MODEL}" "${STORE}" ${PCON_FLAGS}
     rc=$?
     if [ $rc -eq 0 ]; then
         log "Ingest complete"

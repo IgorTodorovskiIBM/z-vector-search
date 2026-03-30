@@ -380,7 +380,7 @@ static void print_usage(const char *prog) {
               << "          store=" << get_default_store() << "\n"
               << "\nOptions:\n"
               << "  --top-k N          Number of results per message (default: 3)\n"
-              << "  --prefix           Use search_query: prefix\n"
+              << "  --no-prefix        Disable search_query: prefix (on by default)\n"
               << "  --source-type TYPE Filter results by source type\n"
               << "  --json             Output as JSON\n"
               << "  --verbose          Show all parsed messages, not just interesting ones\n"
@@ -397,7 +397,7 @@ static void print_usage(const char *prog) {
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     int top_k = 3;
-    bool use_prefix = false;
+    bool use_prefix = true;
     bool json_output = false;
     bool pcon_mode = false;
     std::string source_type_filter;
@@ -412,8 +412,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--json") == 0) {
             json_output = true;
             arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
-            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
+            use_prefix = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
             top_k = std::atoi(argv[arg_idx + 1]);

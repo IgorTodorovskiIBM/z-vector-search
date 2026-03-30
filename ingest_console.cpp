@@ -350,7 +350,7 @@ static void print_usage(const char *prog) {
               << "  --window N         Minutes per chunk (default: 5)\n"
               << "  --max-chunk N      Max messages per chunk (default: 50)\n"
               << "  --threads N        Encoding threads (default: 4)\n"
-              << "  --prefix           Add search_document: prefix\n"
+              << "  --no-prefix        Disable search_document: prefix (on by default)\n"
               << "  --no-filter        Disable message filtering (index everything)\n"
               << "  --filter FILE      Custom filter file (default: " << get_default_filter_path() << ")\n"
               << "  --quiet            Suppress progress output\n"
@@ -370,7 +370,7 @@ int main(int argc, char ** argv) {
     int window_minutes = 5;
     int max_msgs_per_chunk = 50;
     int n_threads = 4;
-    bool use_prefix = false;
+    bool use_prefix = true;
     bool no_filter = false;
     std::string filter_path;
 
@@ -378,8 +378,8 @@ int main(int argc, char ** argv) {
         if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
             arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
-            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
+            use_prefix = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--no-filter") == 0) {
             no_filter = true;

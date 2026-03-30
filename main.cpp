@@ -34,7 +34,7 @@ void llama_log_callback(enum ggml_log_level level, const char * text, void * use
 int main(int argc, char ** argv) {
     int arg_idx = 1;
     std::vector<std::string> suffixes = {".txt", ".md"};
-    bool use_prefix = false;
+    bool use_prefix = true;
     int top_k = 3;
     int chunk_size = 256;
     int chunk_overlap = 64;
@@ -47,8 +47,8 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[arg_idx], "--include") == 0 && arg_idx + 1 < argc) {
             suffixes = parse_suffixes(argv[arg_idx + 1]);
             arg_idx += 2;
-        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
-            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
+            use_prefix = false;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
@@ -89,7 +89,7 @@ int main(int argc, char ** argv) {
         std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model] [directory] <query>\n"
                   << "  Defaults: model=" << get_default_model() << "\n"
                   << "            directory=.\n"
-                  << "  Options: --include .txt,.md  --prefix  --top-k N\n"
+                  << "  Options: --include .txt,.md  --no-prefix  --top-k N\n"
                   << "           --chunk-size N  --chunk-overlap N  --threads N  --quiet\n";
         return 1;
     }

@@ -69,7 +69,7 @@ void print_json(const std::string& query, const std::vector<QueryResult>& result
 
 int main(int argc, char ** argv) {
     bool json_output = false;
-    bool use_prefix = false;
+    bool use_prefix = true;
     bool convert_endian = false;
     int top_k = 3;
     int arg_idx = 1;
@@ -86,8 +86,8 @@ int main(int argc, char ** argv) {
             json_output = true;
         } else if (strcmp(argv[arg_idx], "--quiet") == 0) {
             g_quiet = true;
-        } else if (strcmp(argv[arg_idx], "--prefix") == 0) {
-            use_prefix = true;
+        } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
+            use_prefix = false;
         } else if (strcmp(argv[arg_idx], "--top-k") == 0 && arg_idx + 1 < argc) {
             top_k = std::atoi(argv[arg_idx + 1]);
             arg_idx++;
