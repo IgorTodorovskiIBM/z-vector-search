@@ -46,6 +46,16 @@ static std::string extract_leading_msgid(const std::string &line) {
     size_t alpha_len = i - start;
     if (alpha_len < 2 || alpha_len > 8) return "";
 
+    // Check for underscore-separated synthetic IDs (ABEND_0C4, WAIT_001, etc.)
+    if (i < len && line[i] == '_') {
+        i++; // skip underscore
+        size_t suffix_start = i;
+        while (i < len && (isupper(line[i]) || isdigit(line[i]) || line[i] == '_')) i++;
+        if (i - suffix_start < 2) return "";  // need at least 2 chars after underscore
+        if (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n') return "";
+        return line.substr(start, i - start);
+    }
+
     // Digits
     size_t dstart = i;
     while (i < len && isdigit(line[i])) i++;

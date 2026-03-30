@@ -2,7 +2,7 @@ build/
 build-test/
 *.bin
 *.db
-!ibm-docs/ibm-messages.db.xz
+!ibm-docs/ibm-messages.db.xz.part*
 *.gguf
 ibm-docs/*.pdf
 ibm-docs/txt/
