@@ -190,18 +190,22 @@ inline bool store_open_readonly(StoreDB &store, const std::string &path) {
     return true;
 }
 
-// Open a store in true read-only mode (no WAL creation, no schema changes).
-// Safe for concurrent access to static databases like the IBM messages DB.
-inline bool store_open_readonly_strict(StoreDB &store, const std::string &path) {
+// Open a static/read-only DB (like IBM messages) with READWRITE for sqlite-vec
+// KNN queries, but skip migrations to avoid modifying the DB.
+inline bool store_open_ibm(StoreDB &store, const std::string &path) {
     store.n_embd = 0;
-    int rc = sqlite3_open_v2(path.c_str(), &store.db, SQLITE_OPEN_READONLY, nullptr);
+
+    int rc = sqlite3_open_v2(path.c_str(), &store.db, SQLITE_OPEN_READWRITE, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "sqlite3_open (readonly): " << sqlite3_errmsg(store.db) << std::endl;
+        std::cerr << "sqlite3_open: " << sqlite3_errmsg(store.db) << std::endl;
         return false;
     }
+
     char *vec_err = nullptr;
     sqlite3_vec_init(store.db, &vec_err, nullptr);
     if (vec_err) sqlite3_free(vec_err);
+
+    // No WAL, no migrations — this is a static pre-built DB
     return true;
 }
 
@@ -717,8 +721,8 @@ inline std::vector<QueryResult> store_timeline_query(StoreDB &store,
     std::string sql =
         "SELECT id, filename, snippet, source_type, "
         "msgid, severity, jobname, sysname, ts_start, ts_end, "
-        "julian_date, msg_count FROM chunks "
-        "WHERE julian_date = ? AND ts_end >= ? AND ts_start <= ?";
+        "julian_date, msg_count, full_text FROM chunks "
+        "WHERE source_type != 'operlog_meta' AND julian_date = ? AND ts_end >= ? AND ts_start <= ?";
     std::vector<std::string> binds = {julian_date, std::string(lo_str), std::string(hi_str)};
 
     if (!sysname.empty()) {

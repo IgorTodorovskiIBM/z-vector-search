@@ -279,7 +279,7 @@ int main(int argc, char ** argv) {
             struct stat ibm_st;
             if (stat(ibm_path.c_str(), &ibm_st) == 0) {
                 StoreDB ibm_store;
-                if (store_open_readonly(ibm_store, ibm_path)) {
+                if (store_open_ibm(ibm_store, ibm_path)) {
                     auto ibm_results = store_keyword_query(ibm_store, pq.kw, top_k);
                     for (auto &r : ibm_results) {
                         r.store_tag = "ibm_doc";
@@ -381,7 +381,7 @@ int main(int argc, char ** argv) {
         std::string ibm_path = get_default_ibm_messages_db();
         struct stat ibm_st;
         if (stat(ibm_path.c_str(), &ibm_st) == 0) {
-            if (store_open_readonly(ibm_store, ibm_path)) {
+            if (store_open_ibm(ibm_store, ibm_path)) {
                 has_ibm_store = true;
             }
         }

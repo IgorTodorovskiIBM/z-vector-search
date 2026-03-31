@@ -732,8 +732,13 @@ int main(int argc, char ** argv) {
         // Try to open store for history lookups (keyword only, no model)
         StoreDB hist_store;
         bool has_history = false;
-        if (store_open_readonly(hist_store, store_path)) {
-            if (store_count(hist_store) > 0) has_history = true;
+        {
+            struct stat st;
+            if (stat(store_path.c_str(), &st) == 0) {
+                if (store_open_readonly(hist_store, store_path)) {
+                    if (store_count(hist_store) > 0) has_history = true;
+                }
+            }
         }
 
         // Annotate critical and warning groups with history
@@ -796,7 +801,7 @@ int main(int argc, char ** argv) {
         std::string ibm_path = get_default_ibm_messages_db();
         struct stat ibm_st;
         if (stat(ibm_path.c_str(), &ibm_st) == 0) {
-            if (store_open_readonly(ibm_store, ibm_path)) {
+            if (store_open_ibm(ibm_store, ibm_path)) {
                 has_ibm_store = true;
                 if (!g_quiet) {
                     std::cerr << "IBM messages DB: " << ibm_path
