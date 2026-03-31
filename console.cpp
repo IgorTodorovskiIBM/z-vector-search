@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <algorithm>
+#include <set>
 #include <sys/stat.h>
 #include "llama.h"
 #include "common_store.h"
@@ -371,6 +372,192 @@ static std::string extract_pcon_content(const std::string &json) {
     return all_content;
 }
 
+// --- Summary mode ---
+
+struct MsgGroup {
+    std::string msgid;
+    char severity = ' ';
+    int count = 0;
+    std::set<std::string> jobnames;
+    std::set<std::string> sysnames;
+    std::string first_timestamp;
+    std::string last_timestamp;
+    std::string sample_text;       // first occurrence, truncated
+    int history_count = -1;        // -1 = no store available
+    int history_days = 0;          // distinct julian dates in history
+};
+
+// Build MsgGroups from interesting messages (pre-dedup, preserves all metadata)
+static std::vector<MsgGroup> build_groups(const std::vector<ConsoleMessage> &interesting) {
+    std::vector<MsgGroup> groups;
+    std::vector<std::string> seen;
+
+    for (auto &m : interesting) {
+        auto it = std::find(seen.begin(), seen.end(), m.msgid);
+        MsgGroup *g;
+        if (it == seen.end()) {
+            seen.push_back(m.msgid);
+            groups.push_back({});
+            g = &groups.back();
+            g->msgid = m.msgid;
+            g->severity = m.severity;
+            g->first_timestamp = m.timestamp;
+            // Truncate sample text to first meaningful portion
+            g->sample_text = m.text.substr(0, 80);
+        } else {
+            g = &groups[it - seen.begin()];
+        }
+        g->count++;
+        g->last_timestamp = m.timestamp;
+        if (!m.jobname.empty()) g->jobnames.insert(m.jobname);
+        if (!m.sysname.empty()) g->sysnames.insert(m.sysname);
+    }
+    return groups;
+}
+
+// Look up history for a msgid in the operlog store
+static void annotate_history(MsgGroup &g, StoreDB &store) {
+    KeywordQuery kq;
+    kq.msgid_pattern = g.msgid;
+    kq.source_type = "operlog";
+    auto results = store_keyword_query(store, kq, 200);
+    g.history_count = (int)results.size();
+    std::set<std::string> dates;
+    for (auto &r : results) {
+        if (!r.julian_date.empty()) dates.insert(r.julian_date);
+    }
+    g.history_days = (int)dates.size();
+}
+
+static std::string join_set(const std::set<std::string> &s, int max_show = 4) {
+    std::string out;
+    int i = 0;
+    for (auto &v : s) {
+        if (i > 0) out += ", ";
+        if (i >= max_show) { out += "..."; break; }
+        out += v;
+        i++;
+    }
+    return out;
+}
+
+static void print_summary_text(const std::vector<ConsoleMessage> &all_messages,
+                               const std::vector<ConsoleMessage> &interesting,
+                               std::vector<MsgGroup> &groups) {
+    // Classify into tiers
+    std::vector<MsgGroup*> critical, warning, info;
+    for (auto &g : groups) {
+        if (g.severity == 'A' || g.severity == 'E') critical.push_back(&g);
+        else if (g.severity == 'W') warning.push_back(&g);
+        else info.push_back(&g);
+    }
+
+    // Sort each tier by count descending
+    auto by_count = [](const MsgGroup *a, const MsgGroup *b) { return a->count > b->count; };
+    std::sort(critical.begin(), critical.end(), by_count);
+    std::sort(warning.begin(), warning.end(), by_count);
+    std::sort(info.begin(), info.end(), by_count);
+
+    std::cout << "=== Console Summary ===" << std::endl;
+    std::cout << "Parsed " << all_messages.size() << " messages, "
+              << interesting.size() << " interesting, "
+              << groups.size() << " unique IDs" << std::endl;
+    std::cout << std::endl;
+
+    if (!critical.empty()) {
+        std::cout << "CRITICAL:" << std::endl;
+        for (auto *g : critical) {
+            std::cout << "  " << g->msgid << " x" << g->count;
+            // Show a brief excerpt from sample text (skip the msgid itself)
+            std::string excerpt = g->sample_text;
+            if (excerpt.size() > g->msgid.size() + 1)
+                excerpt = excerpt.substr(g->msgid.size() + 1);
+            if (!excerpt.empty()) std::cout << " -- " << trim(excerpt);
+            std::cout << std::endl;
+            if (!g->jobnames.empty())
+                std::cout << "    Jobs: " << join_set(g->jobnames)
+                          << "  Systems: " << join_set(g->sysnames) << std::endl;
+            if (g->history_count > 0)
+                std::cout << "    Recurring: seen " << g->history_count << " times across "
+                          << g->history_days << " days in history" << std::endl;
+            else if (g->history_count == 0)
+                std::cout << "    First occurrence in store history" << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    if (!warning.empty()) {
+        std::cout << "WARNING:" << std::endl;
+        for (auto *g : warning) {
+            std::cout << "  " << g->msgid << " x" << g->count;
+            std::string excerpt = g->sample_text;
+            if (excerpt.size() > g->msgid.size() + 1)
+                excerpt = excerpt.substr(g->msgid.size() + 1);
+            if (!excerpt.empty()) std::cout << " -- " << trim(excerpt);
+            std::cout << std::endl;
+            if (!g->jobnames.empty())
+                std::cout << "    Jobs: " << join_set(g->jobnames)
+                          << "  Systems: " << join_set(g->sysnames) << std::endl;
+            if (g->history_count > 0)
+                std::cout << "    Recurring: seen " << g->history_count << " times across "
+                          << g->history_days << " days in history" << std::endl;
+            else if (g->history_count == 0)
+                std::cout << "    First occurrence in store history" << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    if (!info.empty()) {
+        int total_info = 0;
+        for (auto *g : info) total_info += g->count;
+        std::cout << "INFO (" << info.size() << " unique IDs, "
+                  << total_info << " total):" << std::endl;
+        std::cout << "  ";
+        for (size_t i = 0; i < info.size() && i < 8; i++) {
+            if (i > 0) std::cout << ", ";
+            std::cout << info[i]->msgid << " x" << info[i]->count;
+        }
+        if (info.size() > 8) std::cout << ", ...";
+        std::cout << std::endl;
+        std::cout << std::endl;
+    }
+}
+
+static void print_summary_json(const std::vector<ConsoleMessage> &all_messages,
+                               const std::vector<ConsoleMessage> &interesting,
+                               std::vector<MsgGroup> &groups) {
+    std::cout << "{\n";
+    std::cout << "  \"total_messages\": " << all_messages.size() << ",\n";
+    std::cout << "  \"interesting_messages\": " << interesting.size() << ",\n";
+    std::cout << "  \"groups\": [\n";
+    for (size_t i = 0; i < groups.size(); i++) {
+        auto &g = groups[i];
+        std::string tier = (g.severity == 'A' || g.severity == 'E') ? "critical" :
+                           (g.severity == 'W') ? "warning" : "info";
+        std::cout << "    {\n";
+        std::cout << "      \"msgid\": \"" << escape_json(g.msgid) << "\",\n";
+        std::cout << "      \"severity\": \"" << g.severity << "\",\n";
+        std::cout << "      \"tier\": \"" << tier << "\",\n";
+        std::cout << "      \"count\": " << g.count << ",\n";
+        std::cout << "      \"sample_text\": \"" << escape_json(g.sample_text) << "\",\n";
+        std::cout << "      \"first_timestamp\": \"" << escape_json(g.first_timestamp) << "\",\n";
+        std::cout << "      \"last_timestamp\": \"" << escape_json(g.last_timestamp) << "\",\n";
+        // jobnames
+        std::cout << "      \"jobnames\": [";
+        { int j = 0; for (auto &jn : g.jobnames) { if (j++) std::cout << ", "; std::cout << "\"" << escape_json(jn) << "\""; } }
+        std::cout << "],\n";
+        // sysnames
+        std::cout << "      \"sysnames\": [";
+        { int j = 0; for (auto &sn : g.sysnames) { if (j++) std::cout << ", "; std::cout << "\"" << escape_json(sn) << "\""; } }
+        std::cout << "],\n";
+        std::cout << "      \"history_count\": " << g.history_count << ",\n";
+        std::cout << "      \"history_days\": " << g.history_days << "\n";
+        std::cout << "    }" << (i == groups.size() - 1 ? "" : ",") << "\n";
+    }
+    std::cout << "  ]\n";
+    std::cout << "}\n";
+}
+
 static void print_usage(const char *prog) {
     std::cerr << "Usage:\n"
               << "  " << prog << " [OPTIONS] \"<message>\"\n"
@@ -382,6 +569,7 @@ static void print_usage(const char *prog) {
               << "  --top-k N          Number of results per message (default: 3)\n"
               << "  --no-prefix        Disable search_query: prefix (on by default)\n"
               << "  --source-type TYPE Filter results by source type\n"
+              << "  --summary          Grouped overview by severity (no model needed)\n"
               << "  --json             Output as JSON\n"
               << "  --verbose          Show all messages + llama.cpp logs\n"
               << "\nPcon flags (when using --pcon mode):\n"
@@ -398,6 +586,7 @@ int main(int argc, char ** argv) {
     int top_k = 5;
     bool use_prefix = true;
     bool json_output = false;
+    bool summary_mode = false;
     bool pcon_mode = false;
     std::string source_type_filter;
 
@@ -408,6 +597,9 @@ int main(int argc, char ** argv) {
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--json") == 0) {
             json_output = true;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--summary") == 0) {
+            summary_mode = true;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--no-prefix") == 0) {
             use_prefix = false;
@@ -530,6 +722,31 @@ int main(int argc, char ** argv) {
     if (unique_msgs.empty()) {
         std::cout << "No interesting messages found in "
                   << all_messages.size() << " total messages." << std::endl;
+        return 0;
+    }
+
+    // --- Summary mode: grouped overview, no model needed ---
+    if (summary_mode) {
+        auto groups = build_groups(interesting);
+
+        // Try to open store for history lookups (keyword only, no model)
+        StoreDB hist_store;
+        bool has_history = false;
+        if (store_open_readonly(hist_store, store_path)) {
+            if (store_count(hist_store) > 0) has_history = true;
+        }
+
+        // Annotate critical and warning groups with history
+        for (auto &g : groups) {
+            if (has_history && (g.severity == 'A' || g.severity == 'E' || g.severity == 'W')) {
+                annotate_history(g, hist_store);
+            }
+        }
+
+        if (json_output)
+            print_summary_json(all_messages, interesting, groups);
+        else
+            print_summary_text(all_messages, interesting, groups);
         return 0;
     }
 
