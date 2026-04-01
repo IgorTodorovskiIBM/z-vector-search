@@ -5,11 +5,16 @@
 #include <cstring>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <chrono>
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
 #include "defaults.h"
 #include "hybrid_search.h"
+
+static double ms_since(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
 
 static bool g_quiet = true;
 
@@ -83,6 +88,7 @@ int main(int argc, char ** argv) {
     std::string opt_timeline;
     int opt_timeline_window = 10;
     char opt_severity = '\0';
+    bool show_metrics = false;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--json") == 0) {
@@ -129,6 +135,8 @@ int main(int argc, char ** argv) {
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "--convert-endian") == 0) {
             convert_endian = true;
+        } else if (strcmp(argv[arg_idx], "--metrics") == 0) {
+            show_metrics = true;
         } else {
             break;
         }
@@ -158,6 +166,8 @@ int main(int argc, char ** argv) {
                   << "    --timeline HH:MM   Show chunks around this time\n"
                   << "    --window N         Timeline window in minutes (default: 10)\n"
                   << "    --mode MODE        Force: auto|semantic|keyword|hybrid\n"
+                  << "\n  Output:\n"
+                  << "    --metrics          Print performance timing to stderr as JSON\n"
                   << "\n  Utilities:\n"
                   << "    --convert-endian   Swap vector byte order (use once after moving DB across platforms)\n"
                   << std::endl;
@@ -265,6 +275,8 @@ int main(int argc, char ** argv) {
 
     // --- Pure keyword mode: no model needed ---
     if (pq.mode == SEARCH_KEYWORD) {
+        auto t_search_start = std::chrono::steady_clock::now();
+
         StoreDB store;
         if (!store_open_readonly(store, store_path)) {
             std::cerr << "Error: failed to open store " << store_path << std::endl;
@@ -290,7 +302,17 @@ int main(int argc, char ** argv) {
         }
         if ((int)results.size() > top_k) results.resize(top_k);
 
+        double search_ms = ms_since(t_search_start);
         int total = store_count(store);
+
+        if (show_metrics) {
+            std::cerr << "{\"mode\":\"keyword\""
+                      << ",\"search_ms\":" << search_ms
+                      << ",\"total_ms\":" << search_ms
+                      << ",\"results\":" << results.size()
+                      << ",\"store_chunks\":" << total
+                      << "}" << std::endl;
+        }
 
         if (json_output) {
             print_json(query, results, mode_str);
@@ -314,6 +336,9 @@ int main(int argc, char ** argv) {
     }
 
     // --- Semantic or Hybrid: need the embedding model ---
+    auto t_total_start = std::chrono::steady_clock::now();
+    auto t_model_start = std::chrono::steady_clock::now();
+
     llama_backend_init();
     auto mparams = llama_model_default_params();
     llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
@@ -332,6 +357,8 @@ int main(int argc, char ** argv) {
 
     const bool is_encoder = llama_model_has_encoder(model);
 
+    double model_load_ms = ms_since(t_model_start);
+
     StoreDB store;
     if (!store_open(store, store_path, n_embd)) {
         std::cerr << "Error: failed to open store " << store_path << std::endl;
@@ -345,6 +372,7 @@ int main(int argc, char ** argv) {
     }
 
     // Embed the query text (use pq.text for hybrid, full query for semantic)
+    auto t_embed_start = std::chrono::steady_clock::now();
     std::string embed_text = pq.mode == SEARCH_HYBRID && !pq.text.empty() ? pq.text : query;
     std::string q_input = use_prefix ? "search_query: " + embed_text : embed_text;
 
@@ -369,6 +397,8 @@ int main(int argc, char ** argv) {
     std::vector<float> query_vec(q_emb, q_emb + n_embd);
     normalize_embedding(query_vec);
 
+    double embed_ms = ms_since(t_embed_start);
+
     if (!g_quiet) {
         std::cerr << "Query vector (first 4): " << query_vec[0] << ", " << query_vec[1]
                   << ", " << query_vec[2] << ", " << query_vec[3] << std::endl;
@@ -387,6 +417,7 @@ int main(int argc, char ** argv) {
         }
     }
 
+    auto t_search_start = std::chrono::steady_clock::now();
     std::vector<QueryResult> results;
 
     if (pq.mode == SEARCH_HYBRID) {
@@ -410,6 +441,20 @@ int main(int argc, char ** argv) {
             std::sort(results.begin(), results.end(), [](const QueryResult &a, const QueryResult &b) { return a.distance < b.distance; });
             if ((int)results.size() > top_k) results.resize(top_k);
         }
+    }
+
+    double search_ms = ms_since(t_search_start);
+    double total_ms = ms_since(t_total_start);
+
+    if (show_metrics) {
+        std::cerr << "{\"mode\":\"" << mode_str << "\""
+                  << ",\"model_load_ms\":" << model_load_ms
+                  << ",\"embed_ms\":" << embed_ms
+                  << ",\"search_ms\":" << search_ms
+                  << ",\"total_ms\":" << total_ms
+                  << ",\"results\":" << results.size()
+                  << ",\"store_chunks\":" << total
+                  << "}" << std::endl;
     }
 
     if (json_output) {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <chrono>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -18,6 +19,10 @@
 #include "defaults.h"
 #include "msg_filter.h"
 #include "hybrid_search.h"
+
+static double ms_since(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
 
 static bool g_quiet = true;
 static bool g_verbose = false;
@@ -51,6 +56,10 @@ struct Metrics {
     int skipped = 0;
     int cache_hits = 0;
     int enriched = 0;
+    double model_load_ms = 0;
+    double total_enrich_ms = 0;
+    double total_embed_ms = 0;
+    double total_search_ms = 0;
 };
 
 // --- Result cache ---
@@ -980,6 +989,7 @@ int main(int argc, char ** argv) {
               << unique_msgs.size() << " unique IDs to look up." << std::endl;
 
     // Initialize llama.cpp
+    auto t_model_start = std::chrono::steady_clock::now();
     llama_log_set(llama_log_callback, NULL);
     llama_backend_init();
 
@@ -1000,6 +1010,8 @@ int main(int argc, char ** argv) {
 
     const bool is_encoder = llama_model_has_encoder(model);
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+
+    metrics.model_load_ms = ms_since(t_model_start);
 
     // Open store
     StoreDB store;
@@ -1053,11 +1065,14 @@ int main(int argc, char ** argv) {
         }
 
         if (!from_cache) {
+            auto t_enrich_start = std::chrono::steady_clock::now();
+
             // Build a search query from the message ID and full text
             std::string query_text = msg.msgid + " " + msg.text;
             if (use_prefix) query_text = "search_query: " + query_text;
 
             // Tokenize and embed
+            auto t_embed_start = std::chrono::steady_clock::now();
             auto q_tokens = std::vector<llama_token>(query_text.size() + 2);
             int n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
                                      q_tokens.data(), q_tokens.size(), true, true);
@@ -1083,10 +1098,12 @@ int main(int argc, char ** argv) {
 
             std::vector<float> query_vec(q_emb, q_emb + n_embd);
             normalize_embedding(query_vec);
+            metrics.total_embed_ms += ms_since(t_embed_start);
 
             // Two-phase hybrid lookup:
             // 1. Keyword search on msgid — finds exact documentation and past occurrences
             // 2. Semantic search on full message text — finds broader context
+            auto t_search_start = std::chrono::steady_clock::now();
             std::vector<QueryResult> kw_results;
             if (!msg.msgid.empty()) {
                 KeywordQuery kq;
@@ -1116,6 +1133,7 @@ int main(int argc, char ** argv) {
                     sem_results.push_back(std::move(r));
                 }
             }
+            metrics.total_search_ms += ms_since(t_search_start);
 
             // Merge via RRF if we have both, otherwise use whichever has results
             if (!kw_results.empty() && !sem_results.empty()) {
@@ -1131,6 +1149,7 @@ int main(int argc, char ** argv) {
                 result_cache[msg.msgid] = { time(nullptr), results };
             }
             metrics.enriched++;
+            metrics.total_enrich_ms += ms_since(t_enrich_start);
         }
 
         if (json_output) {
@@ -1207,12 +1226,22 @@ int main(int argc, char ** argv) {
 
     // Print metrics
     if (show_metrics) {
+        double avg_enrich_ms = metrics.enriched > 0 ? metrics.total_enrich_ms / metrics.enriched : 0;
+        double avg_embed_ms = metrics.enriched > 0 ? metrics.total_embed_ms / metrics.enriched : 0;
+        double avg_search_ms = metrics.enriched > 0 ? metrics.total_search_ms / metrics.enriched : 0;
         std::cerr << "{\"total_parsed\":" << metrics.total_parsed
                   << ",\"interesting\":" << metrics.interesting
                   << ",\"skipped\":" << metrics.skipped
                   << ",\"unique_ids\":" << metrics.unique_ids
                   << ",\"cache_hits\":" << metrics.cache_hits
                   << ",\"enriched\":" << metrics.enriched
+                  << ",\"model_load_ms\":" << metrics.model_load_ms
+                  << ",\"total_enrich_ms\":" << metrics.total_enrich_ms
+                  << ",\"total_embed_ms\":" << metrics.total_embed_ms
+                  << ",\"total_search_ms\":" << metrics.total_search_ms
+                  << ",\"avg_enrich_ms\":" << avg_enrich_ms
+                  << ",\"avg_embed_ms\":" << avg_embed_ms
+                  << ",\"avg_search_ms\":" << avg_search_ms
                   << "}" << std::endl;
     }
 
