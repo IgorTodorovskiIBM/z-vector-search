@@ -7,7 +7,11 @@
 #include <cstdio>
 #include <algorithm>
 #include <set>
+#include <map>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#include <fstream>
 #include "llama.h"
 #include "common_store.h"
 #include "store_sqlite.h"
@@ -17,6 +21,166 @@
 
 static bool g_quiet = true;
 static bool g_verbose = false;
+
+// --- ANSI color support ---
+static bool g_color = false;
+
+static const char *COL_RED     = "\033[1;31m";
+static const char *COL_YELLOW  = "\033[1;33m";
+static const char *COL_GREEN   = "\033[0;32m";
+static const char *COL_CYAN    = "\033[0;36m";
+static const char *COL_RESET   = "\033[0m";
+
+static const char *sev_color(char sev) {
+    if (!g_color) return "";
+    if (sev == 'A' || sev == 'E') return COL_RED;
+    if (sev == 'W') return COL_YELLOW;
+    if (sev == 'I') return COL_GREEN;
+    return "";
+}
+
+static const char *col_reset() {
+    return g_color ? COL_RESET : "";
+}
+
+// --- Metrics counters ---
+struct Metrics {
+    int total_parsed = 0;
+    int interesting = 0;
+    int unique_ids = 0;
+    int skipped = 0;
+    int cache_hits = 0;
+    int enriched = 0;
+};
+
+// --- Result cache ---
+struct CacheEntry {
+    time_t timestamp;
+    std::vector<QueryResult> results;
+};
+
+static std::string get_cache_path() {
+    return get_default_dir() + "/console_cache.txt";
+}
+
+// Simple file-based cache: one line per entry "timestamp|msgid|distance|source_type|filename|snippet|store_tag|ts_start|result_msgid"
+static std::map<std::string, CacheEntry> load_cache(int ttl_seconds) {
+    std::map<std::string, CacheEntry> cache;
+    std::ifstream f(get_cache_path());
+    if (!f.is_open()) return cache;
+
+    time_t now = time(nullptr);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty()) continue;
+        // Format: TIMESTAMP\tMSGID\tDIST\tSOURCE_TYPE\tFILENAME\tSNIPPET\tSTORE_TAG\tTS_START\tRESULT_MSGID
+        size_t p1 = line.find('\t');
+        if (p1 == std::string::npos) continue;
+        size_t p2 = line.find('\t', p1 + 1);
+        if (p2 == std::string::npos) continue;
+
+        time_t ts = (time_t)std::strtol(line.substr(0, p1).c_str(), nullptr, 10);
+        if (now - ts > ttl_seconds) continue; // expired
+
+        std::string msgid = line.substr(p1 + 1, p2 - p1 - 1);
+
+        // Parse remaining tab-separated fields
+        std::vector<std::string> fields;
+        size_t start = p2 + 1;
+        for (int i = 0; i < 7; i++) {
+            size_t next = line.find('\t', start);
+            if (next == std::string::npos) {
+                fields.push_back(line.substr(start));
+                break;
+            }
+            fields.push_back(line.substr(start, next - start));
+            start = next + 1;
+        }
+        if (fields.size() >= 4) {
+            QueryResult r;
+            r.distance = std::strtof(fields[0].c_str(), nullptr);
+            r.source_type = cache_unescape(fields[1]);
+            r.filename = cache_unescape(fields[2]);
+            r.snippet = cache_unescape(fields[3]);
+            if (fields.size() > 4) r.store_tag = cache_unescape(fields[4]);
+            if (fields.size() > 5) r.ts_start = cache_unescape(fields[5]);
+            if (fields.size() > 6) r.msgid = cache_unescape(fields[6]);
+            cache[msgid].timestamp = ts;
+            cache[msgid].results.push_back(std::move(r));
+        }
+    }
+    return cache;
+}
+
+// Replace tabs and newlines in a string for safe cache serialization
+static std::string cache_escape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\t') out += "\\t";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\\') out += "\\\\";
+        else out += c;
+    }
+    return out;
+}
+
+static std::string cache_unescape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            if (s[i+1] == 't') { out += '\t'; i++; continue; }
+            if (s[i+1] == 'n') { out += '\n'; i++; continue; }
+            if (s[i+1] == '\\') { out += '\\'; i++; continue; }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
+static void save_cache(const std::map<std::string, CacheEntry> &cache) {
+    std::ofstream f(get_cache_path());
+    if (!f.is_open()) return;
+    for (auto &kv : cache) {
+        for (auto &r : kv.second.results) {
+            f << kv.second.timestamp << '\t'
+              << kv.first << '\t'
+              << r.distance << '\t'
+              << cache_escape(r.source_type) << '\t'
+              << cache_escape(r.filename) << '\t'
+              << cache_escape(r.snippet) << '\t'
+              << cache_escape(r.store_tag) << '\t'
+              << cache_escape(r.ts_start) << '\t'
+              << cache_escape(r.msgid) << '\n';
+        }
+    }
+}
+
+// --- Parse --since timestamp ---
+// Accepts: YYYY-MM-DD or YYYY-MM-DDTHH:MM or "YYYY-MM-DD HH:MM"
+// Returns minutes from that time to now, or -1 on parse error.
+static int parse_since(const std::string &s) {
+    struct tm tm_val;
+    memset(&tm_val, 0, sizeof(tm_val));
+
+    // Try YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM
+    const char *p = strptime(s.c_str(), "%Y-%m-%dT%H:%M", &tm_val);
+    if (!p || *p != '\0') {
+        p = strptime(s.c_str(), "%Y-%m-%d %H:%M", &tm_val);
+    }
+    if (!p || *p != '\0') {
+        // Try date only (midnight)
+        p = strptime(s.c_str(), "%Y-%m-%d", &tm_val);
+    }
+    if (!p || *p != '\0') return -1;
+
+    time_t target = mktime(&tm_val);
+    if (target == (time_t)-1) return -1;
+    time_t now = time(nullptr);
+    int diff = (int)difftime(now, target) / 60;
+    return diff > 0 ? diff : 0;
+}
 
 void llama_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level; (void)user_data;
@@ -465,9 +629,9 @@ static void print_summary_text(const std::vector<ConsoleMessage> &all_messages,
     std::cout << std::endl;
 
     if (!critical.empty()) {
-        std::cout << "CRITICAL:" << std::endl;
+        std::cout << sev_color('E') << "CRITICAL:" << col_reset() << std::endl;
         for (auto *g : critical) {
-            std::cout << "  " << g->msgid << " x" << g->count;
+            std::cout << "  " << sev_color('E') << g->msgid << col_reset() << " x" << g->count;
             // Show a brief excerpt from sample text (skip the msgid itself)
             std::string excerpt = g->sample_text;
             if (excerpt.size() > g->msgid.size() + 1)
@@ -487,9 +651,9 @@ static void print_summary_text(const std::vector<ConsoleMessage> &all_messages,
     }
 
     if (!warning.empty()) {
-        std::cout << "WARNING:" << std::endl;
+        std::cout << sev_color('W') << "WARNING:" << col_reset() << std::endl;
         for (auto *g : warning) {
-            std::cout << "  " << g->msgid << " x" << g->count;
+            std::cout << "  " << sev_color('W') << g->msgid << col_reset() << " x" << g->count;
             std::string excerpt = g->sample_text;
             if (excerpt.size() > g->msgid.size() + 1)
                 excerpt = excerpt.substr(g->msgid.size() + 1);
@@ -562,16 +726,24 @@ static void print_usage(const char *prog) {
     std::cerr << "Usage:\n"
               << "  " << prog << " [OPTIONS] \"<message>\"\n"
               << "  " << prog << " [OPTIONS] --pcon [PCON_FLAGS]\n"
+              << "  " << prog << " [OPTIONS] --since TIMESTAMP\n"
               << "  " << prog << " [OPTIONS] [model.gguf] [store.db] \"<message>\"\n"
               << "\nDefaults: model=" << get_default_model() << "\n"
               << "          store=" << get_default_store() << "\n"
               << "\nOptions:\n"
-              << "  --top-k N          Number of results per message (default: 3)\n"
+              << "  --top-k N          Number of results per message (default: 5)\n"
               << "  --no-prefix        Disable search_query: prefix (on by default)\n"
               << "  --source-type TYPE Filter results by source type\n"
               << "  --summary          Grouped overview by severity (no model needed)\n"
               << "  --json             Output as JSON\n"
               << "  --verbose          Show all messages + llama.cpp logs\n"
+              << "  --no-color         Disable colored output\n"
+              << "  --color            Force colored output (auto-detected by default)\n"
+              << "  --since TIMESTAMP  Messages since timestamp (implies --pcon)\n"
+              << "                     Formats: YYYY-MM-DD, YYYY-MM-DDTHH:MM\n"
+              << "  --no-cache         Disable result caching\n"
+              << "  --cache-ttl N      Cache TTL in minutes (default: 2)\n"
+              << "  --metrics          Print processing metrics to stderr as JSON\n"
               << "\nPcon flags (when using --pcon mode):\n"
               << "  -r                 Last 10 minutes (default)\n"
               << "  -l                 Last hour\n"
@@ -588,7 +760,12 @@ int main(int argc, char ** argv) {
     bool json_output = false;
     bool summary_mode = false;
     bool pcon_mode = false;
+    bool use_cache = true;
+    bool show_metrics = false;
+    int cache_ttl = 2;  // minutes
+    int color_override = -1;  // -1 = auto, 0 = off, 1 = on
     std::string source_type_filter;
+    std::string since_str;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--verbose") == 0) {
@@ -614,10 +791,36 @@ int main(int argc, char ** argv) {
             pcon_mode = true;
             arg_idx++;
             break;
+        } else if (strcmp(argv[arg_idx], "--color") == 0) {
+            color_override = 1;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--no-color") == 0) {
+            color_override = 0;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--since") == 0 && arg_idx + 1 < argc) {
+            since_str = argv[arg_idx + 1];
+            pcon_mode = true;
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--no-cache") == 0) {
+            use_cache = false;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--cache-ttl") == 0 && arg_idx + 1 < argc) {
+            cache_ttl = std::atoi(argv[arg_idx + 1]);
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "--metrics") == 0) {
+            show_metrics = true;
+            arg_idx++;
         } else {
             break;
         }
     }
+
+    // Auto-detect color: on if stdout is a TTY and not JSON mode
+    if (color_override == 1) g_color = true;
+    else if (color_override == 0) g_color = false;
+    else g_color = !json_output && isatty(STDOUT_FILENO);
+
+    Metrics metrics;
 
     // In pcon mode, we need 0+ positional args (model/store optional, pcon flags after --pcon)
     // In message mode, we need at least 1 positional arg (the message, or model+store+message)
@@ -661,6 +864,19 @@ int main(int argc, char ** argv) {
             if (!pflags.empty()) pflags += " ";
             pflags += argv[arg_idx++];
         }
+
+        // --since overrides pcon time flags
+        if (!since_str.empty()) {
+            int minutes = parse_since(since_str);
+            if (minutes < 0) {
+                std::cerr << "Error: invalid --since timestamp: " << since_str << std::endl;
+                std::cerr << "Expected: YYYY-MM-DD or YYYY-MM-DDTHH:MM" << std::endl;
+                return 1;
+            }
+            if (minutes == 0) minutes = 1;
+            pflags = "-t " + std::to_string(minutes);
+        }
+
         if (pflags.empty()) pflags = "-r";
 
         if (!g_quiet) std::cerr << "Running: pcon -j " << pflags << std::endl;
@@ -692,6 +908,7 @@ int main(int argc, char ** argv) {
 
     // Parse messages
     auto all_messages = parse_syslog(raw_input);
+    metrics.total_parsed = (int)all_messages.size();
 
     // Filter to interesting messages unless verbose
     std::vector<ConsoleMessage> interesting;
@@ -701,6 +918,8 @@ int main(int argc, char ** argv) {
             interesting.push_back(m);
         }
     }
+    metrics.interesting = (int)interesting.size();
+    metrics.skipped = metrics.total_parsed - metrics.interesting;
 
     // Deduplicate by message ID — keep the first occurrence, count repeats
     std::vector<ConsoleMessage> unique_msgs;
@@ -718,6 +937,7 @@ int main(int argc, char ** argv) {
             }
         }
     }
+    metrics.unique_ids = (int)unique_msgs.size();
 
     if (unique_msgs.empty()) {
         std::cout << "No interesting messages found in "
@@ -811,84 +1031,106 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Load result cache
+    auto result_cache = use_cache ? load_cache(cache_ttl * 60) : std::map<std::string, CacheEntry>();
+
     // Process each unique message
     if (json_output) std::cout << "[\n";
 
     for (size_t mi = 0; mi < unique_msgs.size(); mi++) {
         auto &msg = unique_msgs[mi];
 
-        // Build a search query from the message ID and full text
-        std::string query_text = msg.msgid + " " + msg.text;
-        if (use_prefix) query_text = "search_query: " + query_text;
-
-        // Tokenize and embed
-        auto q_tokens = std::vector<llama_token>(query_text.size() + 2);
-        int n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
-                                 q_tokens.data(), q_tokens.size(), true, true);
-        if (n_q < 0) {
-            q_tokens.resize(-n_q);
-            n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
-                                 q_tokens.data(), q_tokens.size(), true, true);
+        // Check cache first
+        std::vector<QueryResult> results;
+        bool from_cache = false;
+        if (use_cache && !msg.msgid.empty()) {
+            auto it = result_cache.find(msg.msgid);
+            if (it != result_cache.end()) {
+                results = it->second.results;
+                from_cache = true;
+                metrics.cache_hits++;
+            }
         }
-        q_tokens.resize(n_q);
 
-        llama_memory_clear(llama_get_memory(ctx), false);
-        llama_batch batch = build_single_seq_batch(q_tokens.data(), q_tokens.size(), is_encoder);
-        if (embed_batch(ctx, batch, is_encoder) != 0) {
+        if (!from_cache) {
+            // Build a search query from the message ID and full text
+            std::string query_text = msg.msgid + " " + msg.text;
+            if (use_prefix) query_text = "search_query: " + query_text;
+
+            // Tokenize and embed
+            auto q_tokens = std::vector<llama_token>(query_text.size() + 2);
+            int n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
+                                     q_tokens.data(), q_tokens.size(), true, true);
+            if (n_q < 0) {
+                q_tokens.resize(-n_q);
+                n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
+                                     q_tokens.data(), q_tokens.size(), true, true);
+            }
+            q_tokens.resize(n_q);
+
+            llama_memory_clear(llama_get_memory(ctx), false);
+            llama_batch batch = build_single_seq_batch(q_tokens.data(), q_tokens.size(), is_encoder);
+            if (embed_batch(ctx, batch, is_encoder) != 0) {
+                if (is_encoder) llama_batch_free(batch);
+                continue;
+            }
             if (is_encoder) llama_batch_free(batch);
-            continue;
-        }
-        if (is_encoder) llama_batch_free(batch);
 
-        float * q_emb = (pooling_type == LLAMA_POOLING_TYPE_NONE)
-            ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1)
-            : llama_get_embeddings_seq(ctx, 0);
-        if (!q_emb) continue;
+            float * q_emb = (pooling_type == LLAMA_POOLING_TYPE_NONE)
+                ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1)
+                : llama_get_embeddings_seq(ctx, 0);
+            if (!q_emb) continue;
 
-        std::vector<float> query_vec(q_emb, q_emb + n_embd);
-        normalize_embedding(query_vec);
+            std::vector<float> query_vec(q_emb, q_emb + n_embd);
+            normalize_embedding(query_vec);
 
-        // Two-phase hybrid lookup:
-        // 1. Keyword search on msgid — finds exact documentation and past occurrences
-        // 2. Semantic search on full message text — finds broader context
-        std::vector<QueryResult> kw_results;
-        if (!msg.msgid.empty()) {
-            KeywordQuery kq;
-            kq.msgid_pattern = msg.msgid;
-            if (!source_type_filter.empty()) kq.source_type = source_type_filter;
-            kw_results = store_keyword_query(store, kq, top_k);
-        }
-
-        auto sem_results = store_query(store, query_vec, top_k, source_type_filter);
-
-        // Search IBM messages knowledge base if available
-        if (has_ibm_store) {
+            // Two-phase hybrid lookup:
+            // 1. Keyword search on msgid — finds exact documentation and past occurrences
+            // 2. Semantic search on full message text — finds broader context
+            std::vector<QueryResult> kw_results;
             if (!msg.msgid.empty()) {
-                KeywordQuery kq_ibm;
-                kq_ibm.msgid_pattern = msg.msgid;
-                auto ibm_kw = store_keyword_query(ibm_store, kq_ibm, top_k);
-                for (auto &r : ibm_kw) {
+                KeywordQuery kq;
+                kq.msgid_pattern = msg.msgid;
+                if (!source_type_filter.empty()) kq.source_type = source_type_filter;
+                kw_results = store_keyword_query(store, kq, top_k);
+            }
+
+            auto sem_results = store_query(store, query_vec, top_k, source_type_filter);
+
+            // Search IBM messages knowledge base if available
+            if (has_ibm_store) {
+                if (!msg.msgid.empty()) {
+                    KeywordQuery kq_ibm;
+                    kq_ibm.msgid_pattern = msg.msgid;
+                    auto ibm_kw = store_keyword_query(ibm_store, kq_ibm, top_k);
+                    for (auto &r : ibm_kw) {
+                        r.store_tag = "ibm_doc";
+                        r.rowid += INT64_MAX / 2;
+                        kw_results.push_back(std::move(r));
+                    }
+                }
+                auto ibm_sem = store_query(ibm_store, query_vec, top_k, "");
+                for (auto &r : ibm_sem) {
                     r.store_tag = "ibm_doc";
                     r.rowid += INT64_MAX / 2;
-                    kw_results.push_back(std::move(r));
+                    sem_results.push_back(std::move(r));
                 }
             }
-            auto ibm_sem = store_query(ibm_store, query_vec, top_k, "");
-            for (auto &r : ibm_sem) {
-                r.store_tag = "ibm_doc";
-                r.rowid += INT64_MAX / 2;
-                sem_results.push_back(std::move(r));
-            }
-        }
 
-        // Merge via RRF if we have both, otherwise use whichever has results
-        std::vector<QueryResult> results;
-        if (!kw_results.empty() && !sem_results.empty()) {
-            results = rrf_merge(kw_results, sem_results, top_k);
-        } else if (!kw_results.empty()) {
-            results = kw_results;
-        } else {
-            results = sem_results;
+            // Merge via RRF if we have both, otherwise use whichever has results
+            if (!kw_results.empty() && !sem_results.empty()) {
+                results = rrf_merge(kw_results, sem_results, top_k);
+            } else if (!kw_results.empty()) {
+                results = kw_results;
+            } else {
+                results = sem_results;
+            }
+
+            // Store in cache
+            if (use_cache && !msg.msgid.empty()) {
+                result_cache[msg.msgid] = { time(nullptr), results };
+            }
+            metrics.enriched++;
         }
 
         if (json_output) {
@@ -920,12 +1162,12 @@ int main(int argc, char ** argv) {
             std::cout << "  }" << (mi == unique_msgs.size() - 1 ? "" : ",") << "\n";
         } else {
             // Header with severity badge
-            std::cout << "=== " << msg.msgid;
+            std::cout << sev_color(msg.severity) << "=== " << msg.msgid;
             if (msg.severity == 'A') std::cout << " (ACTION)";
             else if (msg.severity == 'E') std::cout << " (ERROR)";
             else if (msg.severity == 'W') std::cout << " (WARNING)";
             if (msg.count > 1) std::cout << " [x" << msg.count << "]";
-            std::cout << " ===" << std::endl;
+            std::cout << " ===" << col_reset() << std::endl;
 
             // Message details
             std::cout << "  Time: " << msg.timestamp
@@ -937,11 +1179,13 @@ int main(int argc, char ** argv) {
             if (results.empty()) {
                 std::cout << "  No matching context found in store." << std::endl;
             } else {
-                std::cout << "  Related context:" << std::endl;
+                std::cout << "  Related context:";
+                if (from_cache) std::cout << " " << (g_color ? COL_CYAN : "") << "(cached)" << col_reset();
+                std::cout << std::endl;
                 for (size_t i = 0; i < results.size(); i++) {
                     auto &r = results[i];
                     std::cout << "  [" << i + 1 << "]";
-                    if (!r.store_tag.empty()) std::cout << " [" << r.store_tag << "]";
+                    if (!r.store_tag.empty()) std::cout << " " << (g_color ? COL_CYAN : "") << "[" << r.store_tag << "]" << col_reset();
                     else if (!r.source_type.empty()) std::cout << " [" << r.source_type << "]";
                     std::cout << " " << r.filename;
                     if (r.distance > 0) std::cout << " (dist: " << r.distance << ")";
@@ -955,6 +1199,22 @@ int main(int argc, char ** argv) {
     }
 
     if (json_output) std::cout << "]\n";
+
+    // Save updated cache
+    if (use_cache) {
+        save_cache(result_cache);
+    }
+
+    // Print metrics
+    if (show_metrics) {
+        std::cerr << "{\"total_parsed\":" << metrics.total_parsed
+                  << ",\"interesting\":" << metrics.interesting
+                  << ",\"skipped\":" << metrics.skipped
+                  << ",\"unique_ids\":" << metrics.unique_ids
+                  << ",\"cache_hits\":" << metrics.cache_hits
+                  << ",\"enriched\":" << metrics.enriched
+                  << "}" << std::endl;
+    }
 
     llama_free(ctx);
     llama_model_free(model);
