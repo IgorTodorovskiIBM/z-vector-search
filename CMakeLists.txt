@@ -22,13 +22,16 @@ message(STATUS "Using LLAMA_ROOT: ${LLAMA_ROOT}")
 message(STATUS "Using ZOSLIB_ROOT: ${ZOSLIB_ROOT}")
 message(STATUS "Using BLIS_ROOT: ${BLIS_ROOT}")
 
-# z/OS specific flags
-set(ZOS_FLAGS "-fzos-le-char-mode=ascii -mnocsect -fno-short-enums -m64 -mzos-target=zosv2r5 -march=z13")
-set(ZOS_DEFINES "-D_XOPEN_SOURCE=600 -D_ALL_SOURCE -D_OPEN_SYS_FILE_EXT=1 -D_AE_BIMODAL=1 -D_ENHANCED_ASCII_EXT=0xFFFFFFFF")
-set(ZOS_COMP_FLAGS "-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc")
+# z/OS specific flags — only applied when actually building on/for z/OS so the
+# project stays buildable on macOS/Linux for development and testing.
+if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
+    set(ZOS_FLAGS "-fzos-le-char-mode=ascii -mnocsect -fno-short-enums -m64 -mzos-target=zosv2r5 -march=z13")
+    set(ZOS_DEFINES "-D_XOPEN_SOURCE=600 -D_ALL_SOURCE -D_OPEN_SYS_FILE_EXT=1 -D_AE_BIMODAL=1 -D_ENHANCED_ASCII_EXT=0xFFFFFFFF")
+    set(ZOS_COMP_FLAGS "-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ZOS_FLAGS} ${ZOS_DEFINES} ${ZOS_COMP_FLAGS}")
+endif()
 
 # Flexible Header Search
 include_directories(${CMAKE_SOURCE_DIR})
@@ -45,17 +48,36 @@ target_compile_definitions(sqlite3 PRIVATE
     SQLITE_THREADSAFE=1
     SQLITE_OMIT_LOAD_EXTENSION
 )
-target_include_directories(sqlite3 PUBLIC ${CMAKE_SOURCE_DIR}/vendor)
+target_include_directories(sqlite3 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/vendor>
+    $<INSTALL_INTERFACE:include/vectorsearch>
+)
 
 add_library(sqlite-vec STATIC vendor/sqlite-vec.c)
 target_compile_definitions(sqlite-vec PRIVATE SQLITE_CORE)
-target_include_directories(sqlite-vec PUBLIC ${CMAKE_SOURCE_DIR}/vendor)
+target_include_directories(sqlite-vec PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/vendor>
+    $<INSTALL_INTERFACE:include/vectorsearch>
+)
 target_link_libraries(sqlite-vec sqlite3)
 
-# Helper function to find a library by exact filename
+# Header-only public API — consumers link this and get headers +
+# sqlite + sqlite-vec. llama.cpp is attached via the installed Config
+# file at find_package() time (see cmake/vectorsearchConfig.cmake.in).
+add_library(vectorsearch INTERFACE)
+target_include_directories(vectorsearch INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/vectorsearch>
+)
+target_link_libraries(vectorsearch INTERFACE sqlite3 sqlite-vec)
+
+# Helper function to find a library — prefers static .a (zopen layout),
+# falls back to dynamic (Homebrew/Linux) for local development.
 function(find_zopen_lib VAR NAME ROOT)
     set(SEARCH_PATHS "${ROOT}/lib" "${ROOT}")
-    find_file(${VAR}_FILE NAMES "lib${NAME}.a" PATHS ${SEARCH_PATHS} NO_DEFAULT_PATH)
+    find_file(${VAR}_FILE
+        NAMES "lib${NAME}.a" "lib${NAME}.dylib" "lib${NAME}.so"
+        PATHS ${SEARCH_PATHS} NO_DEFAULT_PATH)
     if(${VAR}_FILE)
         set(${VAR} "${${VAR}_FILE}" PARENT_SCOPE)
     else()
@@ -108,3 +130,50 @@ add_executable(z-setup setup.cpp)
 target_link_libraries(z-setup ${SETUP_LIBS})
 
 install(TARGETS z-index z-query z-vector-search z-console z-ingest-console z-setup DESTINATION bin)
+
+# ---- Reusable library install ----
+# Lets sibling projects (sagebuild, etc.) do:
+#     find_package(vectorsearch REQUIRED)
+#     target_link_libraries(mytool PRIVATE vectorsearch::vectorsearch)
+# and get headers + sqlite + sqlite-vec + llama.cpp transitively.
+
+install(TARGETS vectorsearch sqlite3 sqlite-vec
+    EXPORT vectorsearchTargets
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    INCLUDES DESTINATION include/vectorsearch
+)
+
+install(FILES
+    store_sqlite.h
+    common_store.h
+    hybrid_search.h
+    defaults.h
+    msg_filter.h
+    DESTINATION include/vectorsearch
+)
+
+# Vendor headers live in a subdirectory so store_sqlite.h's existing
+# #include "vendor/sqlite3.h" resolves correctly against the install tree.
+install(FILES
+    vendor/sqlite3.h
+    vendor/sqlite3ext.h
+    vendor/sqlite-vec.h
+    DESTINATION include/vectorsearch/vendor
+)
+
+install(EXPORT vectorsearchTargets
+    FILE vectorsearchTargets.cmake
+    NAMESPACE vectorsearch::
+    DESTINATION lib/cmake/vectorsearch
+)
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    "${CMAKE_SOURCE_DIR}/cmake/vectorsearchConfig.cmake.in"
+    "${CMAKE_BINARY_DIR}/vectorsearchConfig.cmake"
+    INSTALL_DESTINATION lib/cmake/vectorsearch
+)
+install(FILES "${CMAKE_BINARY_DIR}/vectorsearchConfig.cmake"
+    DESTINATION lib/cmake/vectorsearch
+)

@@ -1,0 +1,78 @@
+@PACKAGE_INIT@
+
+# Pull in the exported targets (vectorsearch::vectorsearch, vectorsearch::sqlite3,
+# vectorsearch::sqlite-vec) from the install tree.
+include("${CMAKE_CURRENT_LIST_DIR}/vectorsearchTargets.cmake")
+
+# llama.cpp and friends are re-probed at find_package() time rather than baked
+# into the exported targets, so consumers get whatever llama is installed now —
+# not wherever it happened to live when vectorsearch was built.
+#
+# Override with -DLLAMA_ROOT=... / -DBLIS_ROOT=... / -DZOSLIB_ROOT=... or let
+# the defaults below kick in (zopen layout if $ZOPEN_PKGINSTALL is set,
+# otherwise /usr/local).
+
+if(DEFINED ENV{ZOPEN_PKGINSTALL})
+    set(_vs_default_llama "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
+    set(_vs_default_zoslib "$ENV{ZOPEN_PKGINSTALL}/zoslib/zoslib")
+    set(_vs_default_blis "$ENV{ZOPEN_PKGINSTALL}/blis/blis-2.0")
+else()
+    set(_vs_default_llama "/usr/local/llamacpp")
+    set(_vs_default_zoslib "/usr/local/zoslib")
+    set(_vs_default_blis "/usr/local/blis")
+endif()
+
+if(NOT DEFINED LLAMA_ROOT)
+    set(LLAMA_ROOT "${_vs_default_llama}" CACHE PATH "Path to llamacpp installation")
+endif()
+if(NOT DEFINED ZOSLIB_ROOT)
+    set(ZOSLIB_ROOT "${_vs_default_zoslib}" CACHE PATH "Path to zoslib installation")
+endif()
+if(NOT DEFINED BLIS_ROOT)
+    set(BLIS_ROOT "${_vs_default_blis}" CACHE PATH "Path to blis installation")
+endif()
+
+function(_vs_find_lib VAR NAME ROOT)
+    # Static archive first (zopen layout), then dynamic (Homebrew/Linux).
+    find_library(${VAR}_LIB
+        NAMES "${NAME}" "lib${NAME}.a" "lib${NAME}.dylib" "lib${NAME}.so"
+        HINTS "${ROOT}/lib" "${ROOT}"
+        NO_DEFAULT_PATH)
+    if(NOT ${VAR}_LIB)
+        find_library(${VAR}_LIB NAMES "${NAME}")
+    endif()
+    set(${VAR} "${${VAR}_LIB}" PARENT_SCOPE)
+endfunction()
+
+_vs_find_lib(_VS_LIB_LLAMA     llama     "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_GGML      ggml      "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_GGML_BASE ggml-base "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_GGML_CPU  ggml-cpu  "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_GGML_BLAS ggml-blas "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_MTMD      mtmd      "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_BLIS      blis      "${BLIS_ROOT}")
+_vs_find_lib(_VS_LIB_ZOSLIB    zoslib    "${ZOSLIB_ROOT}")
+
+set(_VS_LLAMA_LIBS "")
+foreach(L _VS_LIB_LLAMA _VS_LIB_GGML _VS_LIB_GGML_BASE _VS_LIB_GGML_CPU
+          _VS_LIB_GGML_BLAS _VS_LIB_MTMD _VS_LIB_BLIS _VS_LIB_ZOSLIB)
+    if(${L})
+        list(APPEND _VS_LLAMA_LIBS "${${L}}")
+    endif()
+endforeach()
+
+# llama headers — consumers including common_store.h need <llama.h>.
+if(EXISTS "${LLAMA_ROOT}/include/llama.h")
+    target_include_directories(vectorsearch::vectorsearch INTERFACE "${LLAMA_ROOT}/include")
+elseif(EXISTS "${LLAMA_ROOT}/llama.h")
+    target_include_directories(vectorsearch::vectorsearch INTERFACE "${LLAMA_ROOT}")
+endif()
+
+# Attach whatever we found to the interface target. Missing libs aren't fatal
+# here — a consumer that never calls embedding functions won't reference the
+# llama symbols, so the linker will be happy either way.
+if(_VS_LLAMA_LIBS)
+    target_link_libraries(vectorsearch::vectorsearch INTERFACE ${_VS_LLAMA_LIBS})
+endif()
+
+check_required_components(vectorsearch)

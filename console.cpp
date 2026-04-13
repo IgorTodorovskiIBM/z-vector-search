@@ -72,6 +72,9 @@ static std::string get_cache_path() {
     return get_default_dir() + "/console_cache.txt";
 }
 
+// Forward declaration — definition lives below load_cache.
+static std::string cache_unescape(const std::string &s);
+
 // Simple file-based cache: one line per entry "timestamp|msgid|distance|source_type|filename|snippet|store_tag|ts_start|result_msgid"
 static std::map<std::string, CacheEntry> load_cache(int ttl_seconds) {
     std::map<std::string, CacheEntry> cache;
