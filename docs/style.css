@@ -373,6 +373,48 @@ h3 { font-size: clamp(1.2rem, 2.5vw, 1.5rem); }
   flex-wrap: wrap;
 }
 
+/* Hero install command */
+.hero-install {
+  margin-top: 40px;
+  text-align: center;
+}
+
+.hero-install-code {
+  display: inline-block;
+  padding: 12px 28px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border-glass);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--accent-green);
+  letter-spacing: 0.01em;
+  user-select: all;
+  cursor: text;
+}
+
+.hero-install-prompt {
+  color: var(--accent-cyan);
+  margin-right: 6px;
+  user-select: none;
+}
+
+.hero-install-link {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.hero-install-link a {
+  color: var(--accent-cyan);
+  font-weight: 500;
+}
+
+.hero-install-link a:hover {
+  color: var(--accent-amber);
+}
+
 /* ---------- Buttons ---------- */
 .btn {
   display: inline-flex;
@@ -454,15 +496,40 @@ h3 { font-size: clamp(1.2rem, 2.5vw, 1.5rem); }
   align-items: center;
 }
 
-.problem-text p {
-  color: var(--text-secondary);
-  font-size: 1.05rem;
-  margin-bottom: 20px;
-  line-height: 1.8;
+.problem-points {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
-.problem-text p strong {
+.problem-points li {
+  color: var(--text-secondary);
+  font-size: 1rem;
+  line-height: 1.7;
+  padding: 16px 20px;
+  border-left: 3px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  transition: border-color 0.3s var(--ease-out), background 0.3s var(--ease-out);
+}
+
+.problem-points li:hover {
+  border-left-color: var(--accent-cyan);
+  background: rgba(0, 229, 255, 0.03);
+}
+
+.problem-points li strong {
   color: var(--text-primary);
+  display: block;
+  margin-bottom: 4px;
+  font-size: 1.05rem;
+}
+
+.problem-points li em {
+  color: var(--accent-cyan);
+  font-style: normal;
+  font-weight: 600;
 }
 
 .problem-visual {

@@ -103,6 +103,13 @@
           View on GitHub
         </a>
       </div>
+
+      <div class="hero-install">
+        <div class="hero-install-code">
+          <span class="hero-install-prompt">$</span> zopen install z-vector-search
+        </div>
+        <div class="hero-install-link">Available on <a href="https://zopen.community/#/" target="_blank" rel="noopener">zopen.community</a></div>
+      </div>
     </div>
   </section>
 
@@ -141,15 +148,11 @@
         <div class="problem-text reveal">
           <div class="section-label">The Problem</div>
           <h2 class="section-title">Console messages shouldn't require tribal knowledge</h2>
-          <p>
-            Picture a z/OS system programmer staring at a console flooded with messages — ABENDs, RACF violations, dataset allocation errors, CICS abends — trying to figure out which ones matter, what they mean, and whether the system has seen anything like this before.
-          </p>
-          <p>
-            Today, that means flipping between <strong>IBM message manuals</strong>, internal runbooks, ticket histories, and tribal knowledge. What if you could just <em>ask</em>?
-          </p>
-          <p>
-            And critically, for <strong>air-gapped, data-sensitive workloads</strong> that run on mainframes, the answer can't involve shipping data to a cloud LLM. Everything needs to run <strong>directly on the LPAR</strong> where the data already lives.
-          </p>
+          <ul class="problem-points">
+            <li><strong>Too many messages, not enough context.</strong> Operators sift through hundreds of console messages per hour — ABENDs, RACF violations, CICS abends — with no easy way to know which ones matter.</li>
+            <li><strong>Knowledge is scattered.</strong> The answer lives across IBM manuals, runbooks, ticket histories, and people's heads. What if you could just <em>ask</em>?</li>
+            <li><strong>Data can't leave the LPAR.</strong> For air-gapped, regulated workloads, shipping logs to a cloud LLM is a non-starter. Everything must run on z/OS.</li>
+          </ul>
         </div>
         <div class="problem-visual reveal reveal-delay-2">
           <div class="console-window">
@@ -160,17 +163,13 @@
               <span class="console-title">z/OS Operator Console — SYS1</span>
             </div>
             <div class="console-body">
-              <div class="msg-info">N 0000000 SYS1 26087 17:30:42.01 STC00010 $HASP373 PAYROLL STARTED</div>
-              <div class="msg-info">N 0000000 SYS1 26087 17:30:43.22 STC00010 IEF403I PAYROLL - STARTED</div>
-              <div class="msg-error">N 0000000 SYS1 26087 17:30:45.12 STC00123 IEF450I PAYROLL - ABEND=S0C7</div>
-              <div class="msg-warn">N 0000000 SYS1 26087 17:30:45.15 STC00001 IEA404W REAL STORAGE SHORTAGE</div>
-              <div class="msg-error">N 0000000 SYS1 26087 17:30:46.80 STC00200 ICH408I USER(BATCH1) ACCESS REVOKED</div>
-              <div class="msg-info">N 0000000 SYS1 26087 17:30:47.33 STC00150 DSN9022I DB2 COMMAND COMPLETED</div>
-              <div class="msg-info">N 0000000 SYS1 26087 17:30:48.01 STC00080 DFH1501I CICS TRANSACTION COMPLETED</div>
-              <div class="msg-warn">N 0000000 SYS1 26087 17:30:48.55 STC00001 CSV028W MODULE NOT FOUND IN LINKLIST</div>
-              <div class="msg-info">N 0000000 SYS1 26087 17:30:49.10 STC00090 IGD103I SMS ALLOCATED DATASET</div>
+              <div class="msg-info">N SYS1 17:30:42 STC00010 $HASP373 PAYROLL STARTED</div>
+              <div class="msg-error">N SYS1 17:30:45 STC00123 IEF450I PAYROLL - ABEND=S0C7</div>
+              <div class="msg-warn">N SYS1 17:30:45 STC00001 IEA404W REAL STORAGE SHORTAGE</div>
+              <div class="msg-error">N SYS1 17:30:46 STC00200 ICH408I USER(BATCH1) ACCESS REVOKED</div>
+              <div class="msg-info">N SYS1 17:30:48 STC00080 DFH1501I CICS TRANSACTION COMPLETED</div>
               <div><br></div>
-              <div class="prompt">Which of these 847 messages matter? What do they mean?</div>
+              <div class="prompt">847 messages in the last hour. Which ones matter?</div>
             </div>
           </div>
         </div>
