@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- SEO -->
+  <title>z-vector-search — RAG-Powered Semantic Search for z/OS</title>
+  <meta name="description" content="A high-performance, RAG-powered semantic search engine running natively on z/OS. Index documents, search with natural language, and enrich operator console messages with AI-powered context — all on the mainframe.">
+  <meta name="keywords" content="z/OS, mainframe, RAG, semantic search, embeddings, llama.cpp, vector search, IBM, AI, operator console">
+  <meta name="author" content="Igor Todorovski">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="z-vector-search — RAG-Powered Semantic Search for z/OS">
+  <meta property="og:description" content="Semantic search and RAG for z/OS operator consoles. Powered by llama.cpp and SQLite, running 100% on the mainframe.">
+  <meta property="og:url" content="https://igortodorovskiibm.github.io/z-vector-search/">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="z-vector-search — RAG-Powered Semantic Search for z/OS">
+  <meta name="twitter:description" content="Semantic search and RAG for z/OS operator consoles. Powered by llama.cpp and SQLite, running 100% on the mainframe.">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ============ NAVIGATION ============ -->
+  <nav class="navbar" id="navbar">
+    <div class="container">
+      <a href="#" class="nav-logo" aria-label="z-vector-search home">
+        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="2" width="28" height="28" rx="6" stroke="currentColor" stroke-width="2" fill="none"/>
+          <path d="M9 10h14l-10 12h14" stroke="#00e5ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        z-vector-search
+      </a>
+
+      <ul class="nav-links" id="navLinks">
+        <li><a href="#problem">Why</a></li>
+        <li><a href="#pipeline">Pipeline</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#tools">Tools</a></li>
+        <li><a href="#demo">Demo</a></li>
+        <li><a href="#performance">Performance</a></li>
+        <li><a href="#start">Get Started</a></li>
+        <li>
+          <a href="https://github.com/IgorTodorovskiIBM/z-vector-search" target="_blank" rel="noopener" class="nav-github" aria-label="View on GitHub">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.74.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58A12 12 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+            GitHub
+          </a>
+        </li>
+      </ul>
+
+      <button class="nav-hamburger" id="navHamburger" aria-label="Toggle menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </nav>
+
+
+  <!-- ============ HERO ============ -->
+  <section class="hero" id="hero">
+    <div class="particles">
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+    </div>
+    <div class="hero-grid"></div>
+
+    <div class="hero-content">
+      <div class="hero-badge">
+        <span class="pulse"></span>
+        Runs 100% on z/OS — no cloud, no data leaving the LPAR
+      </div>
+
+      <h1>
+        Semantic Search for the <span class="text-gradient">Mainframe</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        A RAG-powered search engine that runs natively on z/OS. Index documents, search with natural language, and enrich operator console messages with AI-powered context&nbsp;— right where your data lives.
+      </p>
+
+      <div class="hero-actions">
+        <a href="#start" class="btn btn-primary" id="heroGetStarted">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Get Started
+        </a>
+        <a href="https://github.com/IgorTodorovskiIBM/z-vector-search" target="_blank" rel="noopener" class="btn btn-secondary" id="heroGithub">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.74.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58A12 12 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ STATS BAR ============ -->
+  <div class="section-divider"></div>
+  <section class="section" style="padding: 0;">
+    <div class="container">
+      <div class="stats-bar reveal">
+        <div class="stat-item">
+          <div class="stat-value">24,565</div>
+          <div class="stat-label">IBM z/OS Messages Indexed</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value">C++17</div>
+          <div class="stat-label">Pure Native Code</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value">84 MB</div>
+          <div class="stat-label">Embedding Model Size</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value">&lt;0.5s</div>
+          <div class="stat-label">Per-Message Enrichment</div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <div class="section-divider"></div>
+
+
+  <!-- ============ PROBLEM SECTION ============ -->
+  <section class="section" id="problem">
+    <div class="container">
+      <div class="problem-grid">
+        <div class="problem-text reveal">
+          <div class="section-label">The Problem</div>
+          <h2 class="section-title">Console messages shouldn't require tribal knowledge</h2>
+          <p>
+            Picture a z/OS system programmer staring at a console flooded with messages — ABENDs, RACF violations, dataset allocation errors, CICS abends — trying to figure out which ones matter, what they mean, and whether the system has seen anything like this before.
+          </p>
+          <p>
+            Today, that means flipping between <strong>IBM message manuals</strong>, internal runbooks, ticket histories, and tribal knowledge. What if you could just <em>ask</em>?
+          </p>
+          <p>
+            And critically, for <strong>air-gapped, data-sensitive workloads</strong> that run on mainframes, the answer can't involve shipping data to a cloud LLM. Everything needs to run <strong>directly on the LPAR</strong> where the data already lives.
+          </p>
+        </div>
+        <div class="problem-visual reveal reveal-delay-2">
+          <div class="console-window">
+            <div class="console-header">
+              <span class="console-dot red"></span>
+              <span class="console-dot yellow"></span>
+              <span class="console-dot green"></span>
+              <span class="console-title">z/OS Operator Console — SYS1</span>
+            </div>
+            <div class="console-body">
+              <div class="msg-info">N 0000000 SYS1 26087 17:30:42.01 STC00010 $HASP373 PAYROLL STARTED</div>
+              <div class="msg-info">N 0000000 SYS1 26087 17:30:43.22 STC00010 IEF403I PAYROLL - STARTED</div>
+              <div class="msg-error">N 0000000 SYS1 26087 17:30:45.12 STC00123 IEF450I PAYROLL - ABEND=S0C7</div>
+              <div class="msg-warn">N 0000000 SYS1 26087 17:30:45.15 STC00001 IEA404W REAL STORAGE SHORTAGE</div>
+              <div class="msg-error">N 0000000 SYS1 26087 17:30:46.80 STC00200 ICH408I USER(BATCH1) ACCESS REVOKED</div>
+              <div class="msg-info">N 0000000 SYS1 26087 17:30:47.33 STC00150 DSN9022I DB2 COMMAND COMPLETED</div>
+              <div class="msg-info">N 0000000 SYS1 26087 17:30:48.01 STC00080 DFH1501I CICS TRANSACTION COMPLETED</div>
+              <div class="msg-warn">N 0000000 SYS1 26087 17:30:48.55 STC00001 CSV028W MODULE NOT FOUND IN LINKLIST</div>
+              <div class="msg-info">N 0000000 SYS1 26087 17:30:49.10 STC00090 IGD103I SMS ALLOCATED DATASET</div>
+              <div><br></div>
+              <div class="prompt">Which of these 847 messages matter? What do they mean?</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ PIPELINE SECTION ============ -->
+  <section class="section" id="pipeline">
+    <div class="container">
+      <div class="section-header center">
+        <div class="section-label" style="justify-content: center;">How It Works</div>
+        <h2 class="section-title">The RAG Pipeline</h2>
+        <p class="section-subtitle">
+          Every query flows through a pipeline that turns raw text into semantic understanding. Everything runs locally on z/OS — no external API calls, no cloud dependencies.
+        </p>
+      </div>
+
+      <div class="pipeline-wrapper">
+        <div class="pipeline" id="pipeline-anim">
+          <div class="pipeline-step" data-step="0">
+            <div class="pipeline-step-icon">📄</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Ingest</div>
+              <div class="pipeline-step-desc">Console messages, documents, or IBM manuals</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="1">
+            <div class="pipeline-step-icon">✂️</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Chunk</div>
+              <div class="pipeline-step-desc">256 tokens per chunk, 64-token overlap</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="2">
+            <div class="pipeline-step-icon">🧠</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Embed</div>
+              <div class="pipeline-step-desc">Nomic Embed Text v1.5 via llama.cpp</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="3">
+            <div class="pipeline-step-icon">📐</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Normalize</div>
+              <div class="pipeline-step-desc">L2 normalization for cosine distance</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="4">
+            <div class="pipeline-step-icon">💾</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Store</div>
+              <div class="pipeline-step-desc">SQLite + sqlite-vec — single .db file</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="5">
+            <div class="pipeline-step-icon">🔀</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Classify &amp; Search</div>
+              <div class="pipeline-step-desc">Keyword, semantic, or hybrid — auto-detected</div>
+            </div>
+          </div>
+          <div class="pipeline-arrow"></div>
+          <div class="pipeline-step" data-step="6">
+            <div class="pipeline-step-icon">🏆</div>
+            <div class="pipeline-step-content">
+              <div class="pipeline-step-title">Rank &amp; Return</div>
+              <div class="pipeline-step-desc">Reciprocal Rank Fusion → top-K results</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ ARCHITECTURE SECTION ============ -->
+  <section class="section" id="architecture">
+    <div class="container">
+      <div class="section-header center">
+        <div class="section-label" style="justify-content: center;">Under the Hood</div>
+        <h2 class="section-title">Architecture</h2>
+        <p class="section-subtitle">
+          Pure C++17 with vendored dependencies. No Python runtime, no Java, no external services beyond what zopen provides.
+        </p>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch-card reveal">
+          <div class="arch-card-icon">🧬</div>
+          <h3>Embedding Engine</h3>
+          <p>
+            Nomic Embed Text v1.5, an encoder-only model purpose-built for turning text into vectors. Quantized to Q4_K_M at just 84 MB. Uses MEAN pooling and document/query prefixes for optimal retrieval quality.
+          </p>
+          <span class="tech-tag">llama.cpp</span>
+          <span class="tech-tag">Nomic v1.5</span>
+          <span class="tech-tag">Q4_K_M</span>
+        </div>
+
+        <div class="arch-card reveal reveal-delay-1">
+          <div class="arch-card-icon">🗄️</div>
+          <h3>Vector Store</h3>
+          <p>
+            SQLite extended with sqlite-vec for KNN similarity search. No database server, no network dependencies — just a single <code>.db</code> file with text chunks, embeddings, and structured metadata side by side.
+          </p>
+          <span class="tech-tag">SQLite</span>
+          <span class="tech-tag">sqlite-vec</span>
+          <span class="tech-tag">Cosine Distance</span>
+        </div>
+
+        <div class="arch-card reveal reveal-delay-2">
+          <div class="arch-card-icon">🔀</div>
+          <h3>Hybrid Search</h3>
+          <p>
+            Auto-classifies queries as keyword, semantic, or hybrid. Exact message IDs use SQL LIKE; natural language uses vector similarity; mixed queries merge both with Reciprocal Rank Fusion (RRF).
+          </p>
+          <span class="tech-tag">RRF k=60</span>
+          <span class="tech-tag">Auto-classify</span>
+          <span class="tech-tag">KNN</span>
+        </div>
+
+        <div class="arch-card reveal reveal-delay-3">
+          <div class="arch-card-icon">⚡</div>
+          <h3>SIMD Acceleration</h3>
+          <p>
+            Custom s390x VXE intrinsics for vector math and quantized matrix-vector multiplies. 128-bit SIMD processes 8 floats per iteration, turning scalar hot paths into vectorized operations on z15+.
+          </p>
+          <span class="tech-tag">VXE</span>
+          <span class="tech-tag">s390x</span>
+          <span class="tech-tag">vec_mule/vec_mulo</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ TOOLS SECTION ============ -->
+  <section class="section" id="tools">
+    <div class="container">
+      <div class="section-header center">
+        <div class="section-label" style="justify-content: center;">CLI Suite</div>
+        <h2 class="section-title">The Tools</h2>
+        <p class="section-subtitle">
+          A suite of command-line tools that work together. Index once, query repeatedly. All tools default to <code>~/.z-vector-search/</code> for zero-config usage.
+        </p>
+      </div>
+
+      <div class="tools-grid">
+        <div class="tool-card reveal">
+          <div class="tool-card-icon">📥</div>
+          <div class="tool-card-name">z-index</div>
+          <p>Index documents into the persistent vector store. Supports incremental indexing — only new or modified files are re-encoded.</p>
+        </div>
+
+        <div class="tool-card reveal reveal-delay-1">
+          <div class="tool-card-icon">🔍</div>
+          <div class="tool-card-name">z-query</div>
+          <p>Search the store with natural language or structured queries. Auto-detects keyword, semantic, or hybrid mode.</p>
+        </div>
+
+        <div class="tool-card reveal reveal-delay-2">
+          <div class="tool-card-icon">🖥️</div>
+          <div class="tool-card-name">z-console</div>
+          <p>Enrich z/OS console messages with IBM documentation and operational history. Reads live SYSLOG via pcon.</p>
+        </div>
+
+        <div class="tool-card reveal reveal-delay-3">
+          <div class="tool-card-icon">⚙️</div>
+          <div class="tool-card-name">z-setup</div>
+          <p>One-time setup: downloads the embedding model from Hugging Face and unpacks the IBM messages knowledge base.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ DEMO SECTION ============ -->
+  <section class="section demo-section" id="demo">
+    <div class="container">
+      <div class="section-header center">
+        <div class="section-label" style="justify-content: center;">In Action</div>
+        <h2 class="section-title">z-console Demo</h2>
+        <p class="section-subtitle">
+          Feed z-console a RACF violation message and watch it instantly return the IBM documentation and your operational history.
+        </p>
+      </div>
+
+      <div class="demo-window reveal">
+        <div class="console-header">
+          <span class="console-dot red"></span>
+          <span class="console-dot yellow"></span>
+          <span class="console-dot green"></span>
+          <span class="console-title">z-console — enriched output</span>
+        </div>
+        <div class="demo-body" id="demoBody">
+          <div class="line" data-line="0"><span class="cyan">$</span> <span class="bold">z-console "ICH408I USER(BATCH1) GROUP(PROD) LOGON/JOB INITIATION - ACCESS REVOKED"</span></div>
+          <div class="line" data-line="1"><br></div>
+          <div class="line" data-line="2"><span class="dim">Parsed 1 message, 1 interesting, 1 unique ID to look up.</span></div>
+          <div class="line" data-line="3"><br></div>
+          <div class="line" data-line="4"><span class="separator">━━━ </span><span class="red bold">ICH408I</span><span class="separator"> (severity: E) ━━━</span></div>
+          <div class="line" data-line="5"><span class="amber">  ICH408I USER(BATCH1) GROUP(PROD) NAME(BATCH JOB)</span></div>
+          <div class="line" data-line="6"><span class="amber">    LOGON/JOB INITIATION - ACCESS REVOKED</span></div>
+          <div class="line" data-line="7"><br></div>
+          <div class="line" data-line="8"><span class="cyan bold">  IBM Documentation</span> <span class="dim">(keyword match):</span></div>
+          <div class="line" data-line="9"><span class="green">     ICH408I — A RACF-defined user has been revoked. The user's access</span></div>
+          <div class="line" data-line="10"><span class="green">     authority has been removed, typically because consecutive incorrect</span></div>
+          <div class="line" data-line="11"><span class="green">     password attempts exceeded the SETROPTS PASSWORD limit.</span></div>
+          <div class="line" data-line="12"><span class="green">     System Action: The logon or job is rejected.</span></div>
+          <div class="line" data-line="13"><span class="green">     Operator Response: Contact the security administrator to reinstate</span></div>
+          <div class="line" data-line="14"><span class="green">     access via ALTUSER userid RESUME.</span></div>
+          <div class="line" data-line="15"><span class="dim">     (distance: 0.12)</span></div>
+          <div class="line" data-line="16"><br></div>
+          <div class="line" data-line="17"><span class="purple bold">  Operational History</span> <span class="dim">(semantic match):</span></div>
+          <div class="line" data-line="18"><span class="purple">     [2026-04-03 14:22] ICH408I,ICH409I, BATCH1 revoked on SYS1,</span></div>
+          <div class="line" data-line="19"><span class="purple">     resolved by security team reset. Related: RACF password policy</span></div>
+          <div class="line" data-line="20"><span class="purple">     change ticket INC-4421.</span></div>
+          <div class="line" data-line="21"><span class="dim">     (distance: 0.31)</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ PERFORMANCE / SIMD ============ -->
+  <section class="section" id="performance">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-label">Performance</div>
+        <h2 class="section-title">Making llama.cpp <span class="text-gradient">Faster</span> on z/OS</h2>
+        <p class="section-subtitle">
+          The s390x backend was running pure scalar code through every hot path. ~900 lines of new VXE intrinsics changed that.
+        </p>
+      </div>
+
+      <div class="perf-grid">
+        <div class="perf-text reveal">
+          <p>
+            On x86, llama.cpp vectorizes everything with <strong>AVX2/AVX-512</strong>. On ARM, it uses <strong>NEON</strong>. On z/OS? Nothing. The quantized matrix-vector multiplies and elementwise float helpers that dominate every forward pass were all scalar.
+          </p>
+          <p>
+            IBM Z processors from z13 onwards include the <strong>Vector Facility for z/Architecture (VXE)</strong> — a 128-bit SIMD instruction set. The new s390x implementations process <strong>8 floats per loop iteration</strong> using <code>vec_xl</code>/<code>vec_add</code>/<code>vec_xst</code>.
+          </p>
+          <p>
+            The core trick for Q4_K quantized multiply: <code>vec_mule</code>/<code>vec_mulo</code> widen int8 → int16 cleanly, then a second pair horizontally reduces into int32 — the whole sequence retires in a handful of cycles on z15.
+          </p>
+
+          <div class="code-block" style="margin-top: 24px;">
+            <div class="code-block-header">
+              <span class="code-block-lang">Metrics output (JSON)</span>
+            </div>
+            <pre><span class="comment">// z-query --metrics "what does abend S0C4 mean"</span>
+{
+  <span class="string">"mode"</span>: <span class="string">"semantic"</span>,
+  <span class="string">"model_load_ms"</span>: <span class="number">2341.5</span>,
+  <span class="string">"embed_ms"</span>: <span class="number">287.3</span>,
+  <span class="string">"search_ms"</span>: <span class="number">42.1</span>,
+  <span class="string">"total_ms"</span>: <span class="number">2812.4</span>,
+  <span class="string">"results"</span>: <span class="number">5</span>,
+  <span class="string">"store_chunks"</span>: <span class="number">34102</span>
+}</pre>
+          </div>
+        </div>
+
+        <div class="perf-highlights reveal reveal-delay-1">
+          <div class="perf-stat">
+            <div class="perf-stat-icon cyan">⚡</div>
+            <div class="perf-stat-content">
+              <h4>Vector Helpers Vectorized</h4>
+              <p>add, sub, mul, scale, mad — 8 floats per iteration via vec_xl/vec_xst</p>
+            </div>
+          </div>
+
+          <div class="perf-stat">
+            <div class="perf-stat-icon amber">🧮</div>
+            <div class="perf-stat-content">
+              <h4>Q4_K × Q8_K GEMV</h4>
+              <p>Brand new ggml_gemv_q4_K_8x4_q8_K with VXE intrinsics for the hot path</p>
+            </div>
+          </div>
+
+          <div class="perf-stat">
+            <div class="perf-stat-icon green">📊</div>
+            <div class="perf-stat-content">
+              <h4>Q8_K Row Quantization</h4>
+              <p>__builtin_s390_vfisb for round-and-convert in a single instruction</p>
+            </div>
+          </div>
+
+          <div class="perf-stat">
+            <div class="perf-stat-icon cyan">🔧</div>
+            <div class="perf-stat-content">
+              <h4>CMake Integration</h4>
+              <p>OS390 build path: -fzvector -m64 -march=z15 with optional MASSV linkage</p>
+            </div>
+          </div>
+
+          <div class="perf-stat">
+            <div class="perf-stat-icon amber">🤖</div>
+            <div class="perf-stat-content">
+              <h4>AI-Assisted Development</h4>
+              <p>IBM Bob helped navigate VXE intrinsics and cross-check quantized format details</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ GETTING STARTED ============ -->
+  <section class="section" id="start">
+    <div class="container">
+      <div class="section-header center">
+        <div class="section-label" style="justify-content: center;">Quick Start</div>
+        <h2 class="section-title">Get Started in 5 Minutes</h2>
+        <p class="section-subtitle">
+          You'll need the <a href="https://zopen.community" target="_blank" rel="noopener">zopen package manager</a> set up on your z/OS system. The <a href="https://zopen.community/#/Guides/QuickStart" target="_blank" rel="noopener">QuickStart Guide</a> takes about five minutes.
+        </p>
+      </div>
+
+      <div class="start-steps">
+        <div class="start-step reveal">
+          <div class="start-step-num">1</div>
+          <div class="start-step-content">
+            <h3>Install via zopen</h3>
+            <p>The simplest way — pulls in llama.cpp and all tools in one shot.</p>
+            <div class="start-step-code">
+              <span class="prompt-char">$ </span>zopen install z-vector-search
+            </div>
+          </div>
+        </div>
+
+        <div class="start-step reveal reveal-delay-1">
+          <div class="start-step-num">2</div>
+          <div class="start-step-content">
+            <h3>Run setup</h3>
+            <p>Downloads the embedding model (~84 MB) and unpacks the IBM messages knowledge base (~160 MB).</p>
+            <div class="start-step-code">
+              <span class="prompt-char">$ </span>z-setup
+            </div>
+          </div>
+        </div>
+
+        <div class="start-step reveal reveal-delay-2">
+          <div class="start-step-num">3</div>
+          <div class="start-step-content">
+            <h3>Query the knowledge base</h3>
+            <p>Search 24,565 IBM z/OS messages with natural language — out of the box.</p>
+            <div class="start-step-code">
+              <span class="prompt-char">$ </span>z-query "what does abend S0C4 mean"
+            </div>
+          </div>
+        </div>
+
+        <div class="start-step reveal reveal-delay-3">
+          <div class="start-step-num">4</div>
+          <div class="start-step-content">
+            <h3>Enrich console messages</h3>
+            <p>Feed z-console a single message or read your live SYSLOG for instant context.</p>
+            <div class="start-step-code">
+              <span class="prompt-char">$ </span>z-console --pcon -l
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Build from source alternative -->
+      <div class="reveal" style="margin-top: 48px; max-width: 800px; margin-left: auto; margin-right: auto;">
+        <div class="code-block">
+          <div class="code-block-header">
+            <span class="code-block-lang">Build from source (alternative)</span>
+          </div>
+          <pre><span class="comment"># 1. Install llama.cpp via zopen</span>
+<span class="function">zopen</span> install llamacpp
+
+<span class="comment"># 2. Build z-vector-search</span>
+<span class="function">cmake</span> -B build -DLLAMA_ROOT=<span class="string">$ZOPEN_PKGINSTALL/llamacpp</span>
+<span class="function">cmake</span> --build build
+
+<span class="comment"># 3. Run setup and start searching</span>
+<span class="function">z-setup</span>
+<span class="function">z-query</span> <span class="string">"what does abend S0C4 mean"</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/IgorTodorovskiIBM/z-vector-search" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/IgorTodorovskiIBM/z-vector-search/blob/main/README.md" target="_blank" rel="noopener">Documentation</a>
+        <a href="https://zopen.community" target="_blank" rel="noopener">zopen Community</a>
+        <a href="https://igortodorovskiibm.github.io/" target="_blank" rel="noopener">Blog</a>
+      </div>
+      <p class="footer-copy">
+        Built by <a href="https://github.com/IgorTodorovskiIBM" target="_blank" rel="noopener">Igor Todorovski</a> · Open Source under <a href="https://github.com/IgorTodorovskiIBM/z-vector-search/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0</a>
+      </p>
+    </div>
+  </footer>
+
+
+  <!-- Scripts -->
+  <script src="script.js"></script>
+</body>
+</html>
