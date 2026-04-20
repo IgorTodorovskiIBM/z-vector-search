@@ -91,7 +91,36 @@ int main(int argc, char ** argv) {
     bool show_metrics = false;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--json") == 0) {
+        if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
+            std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] [store.db] <query>\n"
+                      << "\n  Defaults: model=" << get_default_model() << "\n"
+                      << "            store=" << get_default_store() << "\n"
+                      << "\n  Search modes (auto-detected or forced with --mode):\n"
+                      << "    semantic   Natural language → vector similarity\n"
+                      << "    keyword    Msgid/wildcard → SQL LIKE\n"
+                      << "    hybrid     Both, merged via Reciprocal Rank Fusion\n"
+                      << "\n  Structured flags:\n"
+                      << "    --msgid PATTERN    Message ID (IEC030I, DFH*)\n"
+                      << "    --job PATTERN      Jobname filter\n"
+                      << "    --sys SYSNAME      System name filter\n"
+                      << "    --severity X       Severity (A, E, W, I)\n"
+                      << "    --date YYYYDDD     Julian date filter\n"
+                      << "    --since HH:MM      After this time\n"
+                      << "    --before HH:MM     Before this time\n"
+                      << "    --timeline HH:MM   Show chunks around this time\n"
+                      << "    --window N         Timeline window in minutes (default: 10)\n"
+                      << "    --mode MODE        Force: auto|semantic|keyword|hybrid\n"
+                      << "    --top-k N          Number of results (default: 5)\n"
+                      << "    --source-type TYPE Filter by source type\n"
+                      << "    --no-prefix        Disable search_query: prefix\n"
+                      << "\n  Output:\n"
+                      << "    --json             Machine-readable JSON output\n"
+                      << "    --metrics          Print performance timing to stderr as JSON\n"
+                      << "\n  Utilities:\n"
+                      << "    --convert-endian   Swap vector byte order (use once after moving DB across platforms)\n"
+                      << std::endl;
+            return 0;
+        } else if (strcmp(argv[arg_idx], "--json") == 0) {
             json_output = true;
         } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
             g_quiet = false;
