@@ -131,8 +131,21 @@ target_link_libraries(z-setup ${SETUP_LIBS})
 
 install(TARGETS z-index z-query z-vector-search z-console z-ingest-console z-setup DESTINATION bin)
 
+# ---- IBM messages DB parts ----
+# Install the pre-packed DB split parts so 'z-setup' can find them at
+# ../ibm-docs/ relative to bin/z-setup after installation, without needing
+# the source tree or internet access for the DB (model still downloads from
+# HuggingFace on first run). Only the .xz.part* files are needed — the full
+# .db, PDFs, and GGUF are not installed.
+file(GLOB IBMDOCS_PARTS "${CMAKE_SOURCE_DIR}/ibm-docs/*.xz.part*")
+if(IBMDOCS_PARTS)
+    install(FILES ${IBMDOCS_PARTS} DESTINATION ibm-docs)
+else()
+    message(WARNING "ibm-docs/*.xz.part* not found — 'z-setup' will require --source-dir or network access")
+endif()
+
 # ---- Reusable library install ----
-# Lets sibling projects (sagebuild, etc.) do:
+# Lets sibling projects (buildsage, etc.) do:
 #     find_package(vectorsearch REQUIRED)
 #     target_link_libraries(mytool PRIVATE vectorsearch::vectorsearch)
 # and get headers + sqlite + sqlite-vec + llama.cpp transitively.
