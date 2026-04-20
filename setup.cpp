@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <climits>
+#include <unistd.h>
 #include <sys/stat.h>
 #include "store_sqlite.h"
 #include "defaults.h"
@@ -13,43 +14,57 @@ static bool file_exists(const std::string &path) {
     return stat(path.c_str(), &st) == 0;
 }
 
-// Resolve the directory that contains the z-setup binary, following symlinks.
-// When invoked via PATH (argv[0] = "z-setup", no slash), we try:
-//   1. Z_VECTOR_SEARCH_HOME env var (set by zopen's .env after installation)
-//   2. realpath(argv[0]) if argv[0] contains a slash (direct invocation)
-// Returns the bin/ directory path, or "" if unresolvable.
-static std::string resolve_bin_dir(const char *argv0) {
-    // zopen sets Z_VECTOR_SEARCH_HOME to the install prefix — the most
-    // reliable source since it survives symlink chains.
-    const char *zvs_home = getenv("Z_VECTOR_SEARCH_HOME");
-    if (zvs_home && zvs_home[0]) {
-        std::string bin = std::string(zvs_home) + "/bin";
-        if (file_exists(bin)) return bin;
-    }
+// Resolve argv[0] to a real absolute path, following symlinks.
+// When argv[0] has no slash (invoked via PATH), searches each PATH entry.
+// Returns the resolved absolute path to the binary, or "" on failure.
+static std::string resolve_self(const char *argv0) {
+    std::string candidate;
 
-    // If argv[0] contains a slash, resolve it (handles direct invocation and
-    // symlinks — realpath follows the chain to the actual binary location).
     if (strchr(argv0, '/')) {
-        char resolved[PATH_MAX];
-        if (realpath(argv0, resolved)) {
-            std::string p(resolved);
-            size_t slash = p.rfind('/');
-            if (slash != std::string::npos) return p.substr(0, slash);
+        // Invoked with an explicit path — resolve directly.
+        candidate = argv0;
+    } else {
+        // Invoked via PATH lookup (e.g. "z-setup") — search PATH entries.
+        const char *path_env = getenv("PATH");
+        if (!path_env) return "";
+        std::string path(path_env);
+        size_t start = 0;
+        while (start <= path.size()) {
+            size_t colon = path.find(':', start);
+            std::string dir = (colon == std::string::npos)
+                ? path.substr(start) : path.substr(start, colon - start);
+            start = (colon == std::string::npos) ? path.size() + 1 : colon + 1;
+            if (dir.empty()) dir = ".";
+            std::string try_path = dir + "/" + argv0;
+            struct stat st;
+            if (stat(try_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) {
+                candidate = try_path;
+                break;
+            }
         }
-        // realpath failed — fall back to lexical dirname
-        std::string p(argv0);
-        size_t slash = p.rfind('/');
-        if (slash != std::string::npos) return p.substr(0, slash);
+        if (candidate.empty()) return "";
     }
 
-    return "";
+    // Follow symlinks to reach the real binary (zopen uses symlink farms).
+    char resolved[PATH_MAX];
+    if (realpath(candidate.c_str(), resolved)) return resolved;
+    return candidate; // realpath failed — use unresolved path
+}
+
+// Returns the bin/ directory of the installed binary, or "" if unresolvable.
+static std::string resolve_bin_dir(const char *argv0) {
+    std::string self = resolve_self(argv0);
+    if (self.empty()) return "";
+    size_t slash = self.rfind('/');
+    if (slash == std::string::npos) return "";
+    return self.substr(0, slash);
 }
 
 // Find the ibm-docs/ directory.  Try in order:
 //   1. --source-dir argument
-//   2. Z_VECTOR_SEARCH_HOME/ibm-docs/ (zopen install, argv[0] via PATH)
-//   3. ../ibm-docs/ relative to the resolved binary location (symlink-safe)
-//   4. Current working directory ibm-docs/
+//   2. ../ibm-docs/ relative to the real binary location (PATH + realpath,
+//      so zopen symlink farms resolve to the actual install prefix)
+//   3. Current working directory ibm-docs/
 static std::string find_source_dir(const std::string &override_dir, const char *argv0) {
     if (!override_dir.empty()) {
         if (file_exists(override_dir + "/ibm-messages.db.xz.partaa")) return override_dir;
