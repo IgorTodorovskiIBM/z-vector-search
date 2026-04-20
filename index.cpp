@@ -223,6 +223,7 @@ int main(int argc, char ** argv) {
 
     ensure_default_dir();
 
+    llama_log_set(llama_log_callback, nullptr);
     llama_backend_init();
     auto mparams = llama_model_default_params();
     llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
