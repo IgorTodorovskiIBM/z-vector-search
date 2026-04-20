@@ -130,7 +130,22 @@ int main(int argc, char ** argv) {
     std::string source_type;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
+        if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
+            std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <directory_path> [store.db]\n"
+                      << "  Defaults: model=" << get_default_model() << "\n"
+                      << "            store=" << get_default_store() << "\n"
+                      << "\n  Options:\n"
+                      << "    --ibm-messages        Parse files as IBM message manuals (one chunk per msgid)\n"
+                      << "    --source-type TYPE     Tag chunks with source type (default: ibm_doc for --ibm-messages)\n"
+                      << "    --include .txt,.md     File extensions to index\n"
+                      << "    --chunk-size N         Tokens per chunk (default: 256)\n"
+                      << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
+                      << "    --no-prefix            Disable search_document: prefix (on by default)\n"
+                      << "    --threads N            Encoding threads (default: 4)\n"
+                      << "    --verbose              Show llama.cpp logs and progress details\n"
+                      << std::endl;
+            return 0;
+        } else if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
             n_threads = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
             continue;
