@@ -128,16 +128,20 @@ int main(int argc, char ** argv) {
     int chunk_overlap = 64;
     int n_threads = 4;
     std::string source_type;
+    std::string store_path; // may be set by --store flag
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
-            std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <directory_path> [store.db]\n"
+            std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <path> [path...] [store.db]\n"
+                      << "  Accepts files and/or directories. Directories are walked recursively.\n"
+                      << "  Explicit files bypass the --include suffix filter.\n"
                       << "  Defaults: model=" << get_default_model() << "\n"
                       << "            store=" << get_default_store() << "\n"
                       << "\n  Options:\n"
+                      << "    --store PATH          Output store (overrides positional store.db)\n"
                       << "    --ibm-messages        Parse files as IBM message manuals (one chunk per msgid)\n"
                       << "    --source-type TYPE     Tag chunks with source type (default: ibm_doc for --ibm-messages)\n"
-                      << "    --include .txt,.md     File extensions to index\n"
+                      << "    --include .txt,.md     File extensions to index (directories only)\n"
                       << "    --chunk-size N         Tokens per chunk (default: 256)\n"
                       << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
                       << "    --no-prefix            Disable search_document: prefix (on by default)\n"
@@ -145,6 +149,9 @@ int main(int argc, char ** argv) {
                       << "    --verbose              Show llama.cpp logs and progress details\n"
                       << std::endl;
             return 0;
+        } else if (strcmp(argv[arg_idx], "--store") == 0 && arg_idx + 1 < argc) {
+            store_path = argv[arg_idx + 1];
+            arg_idx += 2;
         } else if (strcmp(argv[arg_idx], "--threads") == 0 && arg_idx + 1 < argc) {
             n_threads = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
@@ -176,44 +183,44 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (argc - arg_idx < 1) {
-        std::cerr << "Usage: " << argv[0] << " [OPTIONS] [model_path] <directory_path> [store.db]\n"
-                  << "  Defaults: model=" << get_default_model() << "\n"
-                  << "            store=" << get_default_store() << "\n"
-                  << "\n  Options:\n"
-                  << "    --ibm-messages        Parse files as IBM message manuals (one chunk per msgid)\n"
-                  << "    --source-type TYPE     Tag chunks with source type (default: ibm_doc for --ibm-messages)\n"
-                  << "    --include .txt,.md     File extensions to index\n"
-                  << "    --chunk-size N         Tokens per chunk (default: 256)\n"
-                  << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
-                  << "    --no-prefix            Disable search_document: prefix (on by default)\n"
-                  << "    --threads N            Encoding threads (default: 4)\n"
-                  << "    --verbose              Show llama.cpp logs and progress details\n"
-                  << std::endl;
+    // Collect remaining positional args
+    std::vector<std::string> positional;
+    while (arg_idx < argc)
+        positional.push_back(argv[arg_idx++]);
+
+    if (positional.empty()) {
+        std::cerr << "Error: no input paths specified. Run with --help for usage." << std::endl;
         return 1;
     }
 
-    llama_log_set(llama_log_callback, NULL);
-
-    // Resolve args: supports 1, 2, or 3 positional args
-    //   1 arg:  directory (use default model + store)
-    //   2 args: model directory (use default store)
-    //   3 args: model directory store
-    std::string model_path, dir_path, store_path;
-    int remaining = argc - arg_idx;
-    if (remaining >= 3) {
-        model_path = argv[arg_idx++];
-        dir_path = argv[arg_idx++];
-        store_path = argv[arg_idx++];
-    } else if (remaining == 2) {
-        model_path = argv[arg_idx++];
-        dir_path = argv[arg_idx++];
-        store_path = get_default_store();
+    // Resolve model: first positional ending in .gguf, otherwise default.
+    std::string model_path;
+    if (!positional.empty() && positional.front().size() > 5 &&
+        positional.front().substr(positional.front().size() - 5) == ".gguf") {
+        model_path = positional.front();
+        positional.erase(positional.begin());
     } else {
         model_path = get_default_model();
-        dir_path = argv[arg_idx++];
-        store_path = get_default_store();
     }
+
+    // Resolve store: --store flag takes priority; otherwise last positional
+    // ending in .db is the store (backward compat with old 3-arg form).
+    if (store_path.empty() && !positional.empty() &&
+        positional.back().size() > 3 &&
+        positional.back().substr(positional.back().size() - 3) == ".db") {
+        store_path = positional.back();
+        positional.pop_back();
+    }
+    if (store_path.empty())
+        store_path = get_default_store();
+
+    // What remains are input paths — files and/or directories.
+    std::vector<std::string> input_paths = positional;
+    if (input_paths.empty()) {
+        std::cerr << "Error: no input paths after resolving model and store." << std::endl;
+        return 1;
+    }
+
     ensure_default_dir();
 
     llama_backend_init();
@@ -267,11 +274,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Phase 1: Scan directory, determine what needs indexing
+    // Phase 1: Scan inputs, determine what needs indexing.
+    // Each input_path is either a directory (walked recursively, suffix-filtered)
+    // or an explicit file (processed directly, suffix filter bypassed).
     if (!g_quiet) {
-        std::cout << "Indexing: " << dir_path << " (suffixes: ";
-        for (size_t i = 0; i < suffixes.size(); ++i) std::cout << suffixes[i] << (i == suffixes.size() - 1 ? "" : ", ");
-        std::cout << ", chunk=" << chunk_size << ", overlap=" << chunk_overlap << ")" << std::endl;
+        std::cout << "Indexing " << input_paths.size() << " input(s)"
+                  << " (suffixes for dirs: ";
+        for (size_t i = 0; i < suffixes.size(); ++i)
+            std::cout << suffixes[i] << (i + 1 < suffixes.size() ? ", " : "");
+        std::cout << ", chunk=" << chunk_size
+                  << ", overlap=" << chunk_overlap << ")" << std::endl;
     }
 
     std::vector<TokenizedChunk> chunks;
@@ -283,21 +295,17 @@ int main(int argc, char ** argv) {
     // Track which files we see on disk so we can detect deletions
     std::unordered_set<std::string> seen_files;
 
-    for (const auto & entry : fs::recursive_directory_iterator(dir_path)) {
-        if (!entry.is_regular_file() || !has_suffix(entry.path().string(), suffixes)) continue;
-
-        std::string fname = entry.path().string();
-        int64_t mtime = (int64_t)fs::last_write_time(entry).time_since_epoch().count();
+    // Lambda: enqueue one file for indexing.
+    // check_suffix=true for directory walks, false for explicitly named files.
+    auto enqueue_file = [&](const std::string &fname, int64_t mtime, bool check_suffix) {
+        if (check_suffix && !has_suffix(fname, suffixes)) return;
         seen_files.insert(fname);
 
-        // Check if already indexed and unchanged
         auto it = indexed_files.find(fname);
         if (it != indexed_files.end() && it->second == mtime) {
             files_skipped++;
-            continue;
+            return;
         }
-
-        // If it existed before with different mtime, delete old chunks
         if (it != indexed_files.end()) {
             store_delete_file(store, fname);
             files_updated++;
@@ -305,21 +313,18 @@ int main(int argc, char ** argv) {
             files_new++;
         }
 
-        std::ifstream file(entry.path());
+        std::ifstream file(fname);
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         if (content.empty()) {
-            if (!g_quiet) std::cout << "  - Skipped (empty): " << entry.path().filename() << std::endl;
-            continue;
+            if (!g_quiet) std::cout << "  - Skipped (empty): " << fname << std::endl;
+            return;
         }
         files_scanned++;
 
         if (ibm_messages) {
-            // IBM message mode: split on message ID boundaries
             auto msg_chunks = split_ibm_messages(content, fname);
-            if (!g_quiet && !msg_chunks.empty()) {
+            if (!g_quiet && !msg_chunks.empty())
                 std::cout << "  - " << fname << ": " << msg_chunks.size() << " messages" << std::endl;
-            }
-            // Tokenize each message chunk
             for (auto &ch : msg_chunks) {
                 std::string &text = ch.full_text;
                 auto toks = std::vector<llama_token>(text.size() + 2);
@@ -340,22 +345,19 @@ int main(int argc, char ** argv) {
                 chunks.push_back(std::move(ch));
             }
         } else {
-            // Standard mode: fixed-size token chunking
             auto all_tokens = std::vector<llama_token>(content.size() + 2);
-            int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
-                                          !use_prefix, true);
+            int n_tokens = llama_tokenize(vocab, content.c_str(), content.size(),
+                                          all_tokens.data(), all_tokens.size(), !use_prefix, true);
             if (n_tokens < 0) {
                 all_tokens.resize(-n_tokens);
-                n_tokens = llama_tokenize(vocab, content.c_str(), content.size(), all_tokens.data(), all_tokens.size(),
-                                          !use_prefix, true);
+                n_tokens = llama_tokenize(vocab, content.c_str(), content.size(),
+                                          all_tokens.data(), all_tokens.size(), !use_prefix, true);
             }
             all_tokens.resize(n_tokens);
 
             int total_chars = (int)content.size();
             int total_tokens = n_tokens;
-
-            int step = content_chunk_size - chunk_overlap;
-            if (step < 1) step = 1;
+            int step = std::max(1, content_chunk_size - chunk_overlap);
 
             if (total_tokens <= content_chunk_size) {
                 TokenizedChunk ch;
@@ -374,10 +376,9 @@ int main(int argc, char ** argv) {
                 for (int start = 0; start < total_tokens; start += step) {
                     int end = std::min(start + content_chunk_size, total_tokens);
                     chunk_num++;
-
-                    int char_start = (total_chars > 0 && total_tokens > 0)
+                    int char_start = total_chars > 0
                         ? (int)((long long)start * total_chars / total_tokens) : 0;
-                    int char_end = (total_chars > 0 && total_tokens > 0)
+                    int char_end = total_chars > 0
                         ? (int)((long long)end * total_chars / total_tokens) : total_chars;
                     char_start = std::max(0, std::min(char_start, total_chars));
                     char_end = std::max(char_start, std::min(char_end, total_chars));
@@ -386,7 +387,6 @@ int main(int argc, char ** argv) {
                     ch.filename = fname + " [chunk " + std::to_string(chunk_num) + "]";
                     ch.snippet = content.substr(char_start, std::min(500, char_end - char_start));
                     ch.full_text = content.substr(char_start, char_end - char_start);
-
                     if (use_prefix) {
                         ch.tokens = prefix_tokens;
                         ch.tokens.insert(ch.tokens.end(), all_tokens.begin() + start, all_tokens.begin() + end);
@@ -394,12 +394,30 @@ int main(int argc, char ** argv) {
                         ch.tokens.assign(all_tokens.begin() + start, all_tokens.begin() + end);
                     }
                     chunks.push_back(std::move(ch));
-
                     if (end >= total_tokens) break;
                 }
-                if (!g_quiet) std::cout << "  - " << fname << ": " << total_tokens
-                                        << " tokens -> " << chunk_num << " chunks" << std::endl;
+                if (!g_quiet)
+                    std::cout << "  - " << fname << ": " << total_tokens
+                              << " tokens -> " << chunk_num << " chunks" << std::endl;
             }
+        }
+    };
+
+    // Walk each input path: directory → recursive walk with suffix filter,
+    // explicit file → enqueue directly (suffix filter bypassed).
+    for (const auto &input : input_paths) {
+        fs::path p(input);
+        if (fs::is_directory(p)) {
+            for (const auto &entry : fs::recursive_directory_iterator(p)) {
+                if (!entry.is_regular_file()) continue;
+                int64_t mtime = (int64_t)fs::last_write_time(entry).time_since_epoch().count();
+                enqueue_file(entry.path().string(), mtime, true);
+            }
+        } else if (fs::is_regular_file(p)) {
+            int64_t mtime = (int64_t)fs::last_write_time(p).time_since_epoch().count();
+            enqueue_file(p.string(), mtime, false);
+        } else {
+            std::cerr << "Warning: skipping " << input << " (not a file or directory)" << std::endl;
         }
     }
 
