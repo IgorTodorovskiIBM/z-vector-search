@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
 #include <sys/stat.h>
 #include "store_sqlite.h"
 #include "defaults.h"
@@ -12,10 +13,43 @@ static bool file_exists(const std::string &path) {
     return stat(path.c_str(), &st) == 0;
 }
 
+// Resolve the directory that contains the z-setup binary, following symlinks.
+// When invoked via PATH (argv[0] = "z-setup", no slash), we try:
+//   1. Z_VECTOR_SEARCH_HOME env var (set by zopen's .env after installation)
+//   2. realpath(argv[0]) if argv[0] contains a slash (direct invocation)
+// Returns the bin/ directory path, or "" if unresolvable.
+static std::string resolve_bin_dir(const char *argv0) {
+    // zopen sets Z_VECTOR_SEARCH_HOME to the install prefix — the most
+    // reliable source since it survives symlink chains.
+    const char *zvs_home = getenv("Z_VECTOR_SEARCH_HOME");
+    if (zvs_home && zvs_home[0]) {
+        std::string bin = std::string(zvs_home) + "/bin";
+        if (file_exists(bin)) return bin;
+    }
+
+    // If argv[0] contains a slash, resolve it (handles direct invocation and
+    // symlinks — realpath follows the chain to the actual binary location).
+    if (strchr(argv0, '/')) {
+        char resolved[PATH_MAX];
+        if (realpath(argv0, resolved)) {
+            std::string p(resolved);
+            size_t slash = p.rfind('/');
+            if (slash != std::string::npos) return p.substr(0, slash);
+        }
+        // realpath failed — fall back to lexical dirname
+        std::string p(argv0);
+        size_t slash = p.rfind('/');
+        if (slash != std::string::npos) return p.substr(0, slash);
+    }
+
+    return "";
+}
+
 // Find the ibm-docs/ directory.  Try in order:
 //   1. --source-dir argument
-//   2. Relative to argv[0] (../ibm-docs/)
-//   3. Current working directory (ibm-docs/)
+//   2. Z_VECTOR_SEARCH_HOME/ibm-docs/ (zopen install, argv[0] via PATH)
+//   3. ../ibm-docs/ relative to the resolved binary location (symlink-safe)
+//   4. Current working directory ibm-docs/
 static std::string find_source_dir(const std::string &override_dir, const char *argv0) {
     if (!override_dir.empty()) {
         if (file_exists(override_dir + "/ibm-messages.db.xz.partaa")) return override_dir;
@@ -23,11 +57,9 @@ static std::string find_source_dir(const std::string &override_dir, const char *
         return "";
     }
 
-    // Relative to binary
-    std::string bin_dir(argv0);
-    size_t slash = bin_dir.rfind('/');
-    if (slash != std::string::npos) {
-        std::string candidate = bin_dir.substr(0, slash) + "/../ibm-docs";
+    std::string bin_dir = resolve_bin_dir(argv0);
+    if (!bin_dir.empty()) {
+        std::string candidate = bin_dir + "/../ibm-docs";
         if (file_exists(candidate + "/ibm-messages.db.xz.partaa")) return candidate;
     }
 
