@@ -492,8 +492,10 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
                                             const std::string &source_type_filter = "") {
     std::vector<QueryResult> results;
 
-    // sqlite-vec KNN query — fetch extra results when filtering, then trim
-    int fetch_k = source_type_filter.empty() ? top_k : top_k * 5;
+    // sqlite-vec KNN query — fetch extra results when filtering, then trim.
+    // Use 50x to handle sparse source_type buckets (e.g. cc_error_fix is
+    // ~7% of a mixed corpus — 5x would miss it entirely with top_k=1).
+    int fetch_k = source_type_filter.empty() ? top_k : top_k * 50;
 
     std::string sql =
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
