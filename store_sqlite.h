@@ -531,11 +531,19 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
     // ~7% of a mixed corpus — 5x would miss it entirely with top_k=1).
     int fetch_k = source_type_filter.empty() ? top_k : top_k * 50;
 
+    // Provenance columns are added by store_migrate, but static DBs opened via
+    // store_open_ibm are never migrated. Select literals in their place so the
+    // query still prepares against pre-provenance schemas (column order is
+    // preserved either way).
+    bool has_prov = store_column_exists(store.db, "chunks", "pair_id");
+    std::string prov_cols = has_prov
+        ? "c.pair_id, c.origin, c.author, c.verified "
+        : "'' AS pair_id, '' AS origin, '' AS author, 0 AS verified ";
+
     std::string sql =
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
         "c.msgid, c.severity, c.jobname, c.sysname, c.ts_start, c.ts_end, "
-        "c.julian_date, c.msg_count, c.full_text, "
-        "c.pair_id, c.origin, c.author, c.verified "
+        "c.julian_date, c.msg_count, c.full_text, " + prov_cols +
         "FROM vec_chunks v "
         "INNER JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? "
