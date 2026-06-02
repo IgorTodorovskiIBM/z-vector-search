@@ -46,6 +46,12 @@ struct ChunkMeta {
     std::string ts_end;
     std::string julian_date;  // YYYYDDD
     int msg_count = 0;
+
+    // Team-memory provenance (shared error->fix pairs).
+    std::string pair_id;      // content-addressed id, path-independent
+    std::string origin;       // originating project/repo
+    std::string author;       // who produced the fix
+    int verified = 0;         // 1 once blessed for org-wide trust
 };
 
 // Check if a column exists in a table
@@ -75,6 +81,10 @@ inline bool store_migrate(sqlite3 *db) {
         {"julian_date", "TEXT DEFAULT ''"},
         {"msg_count",   "INTEGER DEFAULT 0"},
         {"full_text",   "TEXT DEFAULT ''"},
+        {"pair_id",     "TEXT DEFAULT ''"},
+        {"origin",      "TEXT DEFAULT ''"},
+        {"author",      "TEXT DEFAULT ''"},
+        {"verified",    "INTEGER DEFAULT 0"},
         {nullptr, nullptr}
     };
 
@@ -99,6 +109,7 @@ inline bool store_migrate(sqlite3 *db) {
         "CREATE INDEX IF NOT EXISTS idx_chunks_sysname ON chunks(sysname);",
         "CREATE INDEX IF NOT EXISTS idx_chunks_ts ON chunks(ts_start, ts_end);",
         "CREATE INDEX IF NOT EXISTS idx_chunks_julian ON chunks(julian_date);",
+        "CREATE INDEX IF NOT EXISTS idx_chunks_pair_id ON chunks(pair_id);",
         nullptr
     };
     for (int i = 0; indexes[i]; i++) {
@@ -405,8 +416,9 @@ inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
                                  const std::string &full_text = "") {
     const char *sql_meta =
         "INSERT INTO chunks(filename, snippet, source_type, mtime, "
-        "msgid, severity, jobname, sysname, ts_start, ts_end, julian_date, msg_count, full_text) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        "msgid, severity, jobname, sysname, ts_start, ts_end, julian_date, msg_count, full_text, "
+        "pair_id, origin, author, verified) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(store.db, sql_meta, -1, &stmt, nullptr) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, filename.c_str(), -1, SQLITE_STATIC);
@@ -423,6 +435,10 @@ inline int64_t store_insert_full(StoreDB &store, const std::string &filename,
     sqlite3_bind_text(stmt, 11, meta.julian_date.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 12, meta.msg_count);
     sqlite3_bind_text(stmt, 13, full_text.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 14, meta.pair_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 15, meta.origin.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 16, meta.author.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 17, meta.verified);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::cerr << "insert chunks: " << sqlite3_errmsg(store.db) << std::endl;
         sqlite3_finalize(stmt);
@@ -457,6 +473,19 @@ inline int64_t store_insert(StoreDB &store, const std::string &filename,
     return store_insert_full(store, filename, snippet, source_type, mtime, embedding, empty);
 }
 
+// Team memory: true if a chunk with this content-addressed pair_id already
+// exists. Used by pull to dedupe shared error->fix pairs idempotently.
+inline bool store_pair_id_exists(StoreDB &store, const std::string &pair_id) {
+    if (pair_id.empty()) return false;
+    const char *sql = "SELECT 1 FROM chunks WHERE pair_id = ? LIMIT 1;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, pair_id.c_str(), -1, SQLITE_STATIC);
+    bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
 // Begin/commit transaction helpers
 inline void store_begin(StoreDB &store) {
     sqlite3_exec(store.db, "BEGIN;", nullptr, nullptr, nullptr);
@@ -482,6 +511,11 @@ struct QueryResult {
     std::string julian_date;
     int msg_count = 0;
     std::string store_tag;    // which store this came from (e.g. "ibm_doc")
+    // Team-memory provenance
+    std::string pair_id;
+    std::string origin;
+    std::string author;
+    int verified = 0;
 };
 
 // Query for top-k most similar chunks to the given embedding.
@@ -500,7 +534,8 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
     std::string sql =
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
         "c.msgid, c.severity, c.jobname, c.sysname, c.ts_start, c.ts_end, "
-        "c.julian_date, c.msg_count, c.full_text "
+        "c.julian_date, c.msg_count, c.full_text, "
+        "c.pair_id, c.origin, c.author, c.verified "
         "FROM vec_chunks v "
         "INNER JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? "
@@ -562,6 +597,10 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         qr.julian_date = col_str(stmt, 11);
         qr.msg_count   = sqlite3_column_int(stmt, 12);
         qr.full_text   = col_str(stmt, 13);
+        qr.pair_id     = col_str(stmt, 14);
+        qr.origin      = col_str(stmt, 15);
+        qr.author      = col_str(stmt, 16);
+        qr.verified    = sqlite3_column_int(stmt, 17);
         results.push_back(std::move(qr));
 
         if ((int)results.size() >= top_k) break;
