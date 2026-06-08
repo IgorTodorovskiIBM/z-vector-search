@@ -163,6 +163,7 @@ install(FILES
     hybrid_search.h
     defaults.h
     msg_filter.h
+    console_parse.h
     DESTINATION include/vectorsearch
 )
 
