@@ -648,10 +648,18 @@ inline std::vector<QueryResult> store_keyword_query(StoreDB &store,
                                                      int limit = 20) {
     std::vector<QueryResult> results;
 
+    // Provenance columns may be missing in pre-provenance schemas (same
+    // guard as store_query) — select literals so the query still prepares.
+    bool has_prov = store_column_exists(store.db, "chunks", "pair_id");
+    std::string prov_cols = has_prov
+        ? "pair_id, origin, author, verified "
+        : "'' AS pair_id, '' AS origin, '' AS author, 0 AS verified ";
+
     // Build WHERE clauses dynamically
     std::string sql = "SELECT id, filename, snippet, source_type, "
                       "msgid, severity, jobname, sysname, ts_start, ts_end, "
-                      "julian_date, msg_count, full_text FROM chunks "
+                      "julian_date, msg_count, full_text, " + prov_cols +
+                      "FROM chunks "
                       "WHERE source_type != 'operlog_meta'";
     std::vector<std::string> binds;
 
@@ -738,6 +746,10 @@ inline std::vector<QueryResult> store_keyword_query(StoreDB &store,
         qr.julian_date = col_str(stmt, 10);
         qr.msg_count   = sqlite3_column_int(stmt, 11);
         qr.full_text   = col_str(stmt, 12);
+        qr.pair_id     = col_str(stmt, 13);
+        qr.origin      = col_str(stmt, 14);
+        qr.author      = col_str(stmt, 15);
+        qr.verified    = sqlite3_column_int(stmt, 16);
         results.push_back(std::move(qr));
     }
     sqlite3_finalize(stmt);
