@@ -127,6 +127,7 @@ int main(int argc, char ** argv) {
     int chunk_size = 256;
     int chunk_overlap = 64;
     int n_threads = 4;
+    int batch_chunks = 8;
     std::string source_type;
     std::string store_path; // may be set by --store flag
 
@@ -146,6 +147,7 @@ int main(int argc, char ** argv) {
                       << "    --chunk-overlap N      Overlap between chunks (default: 64)\n"
                       << "    --no-prefix            Disable search_document: prefix (on by default)\n"
                       << "    --threads N            Encoding threads (default: 4)\n"
+                      << "    --batch-chunks N       Chunks encoded per llama.cpp batch (default: 8)\n"
                       << "    --verbose              Show llama.cpp logs and progress details\n"
                       << std::endl;
             return 0;
@@ -156,6 +158,9 @@ int main(int argc, char ** argv) {
             n_threads = std::atoi(argv[arg_idx + 1]);
             arg_idx += 2;
             continue;
+        } else if (strcmp(argv[arg_idx], "--batch-chunks") == 0 && arg_idx + 1 < argc) {
+            batch_chunks = std::max(1, std::atoi(argv[arg_idx + 1]));
+            arg_idx += 2;
         } else if (strcmp(argv[arg_idx], "--verbose") == 0) {
             g_quiet = false;
             arg_idx++;
@@ -231,12 +236,19 @@ int main(int argc, char ** argv) {
 
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
 
+    // Encoder models (T5-style) keep single-sequence batches; BERT-style
+    // embedding models encode several chunks per batch for larger matmuls
+    // and less per-call overhead.
+    const bool is_encoder = llama_model_has_encoder(model);
+    const int slots = is_encoder ? 1 : batch_chunks;
+    const int max_chunk_tokens = chunk_size + 16;
+
     auto cparams = llama_context_default_params();
     cparams.embeddings = true;
-    cparams.n_ctx = chunk_size + 16;
-    cparams.n_batch = chunk_size + 16;
-    cparams.n_ubatch = chunk_size + 16;
-    cparams.n_seq_max = 1;
+    cparams.n_ctx = max_chunk_tokens * slots;
+    cparams.n_batch = max_chunk_tokens * slots;
+    cparams.n_ubatch = max_chunk_tokens * slots;
+    cparams.n_seq_max = slots;
     cparams.n_threads = n_threads;
     cparams.n_threads_batch = n_threads;
 
@@ -244,8 +256,7 @@ int main(int argc, char ** argv) {
     if (!ctx) return 1;
 
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
-    const bool is_encoder = llama_model_has_encoder(model);
-    const int n_ctx = (int)cparams.n_ctx;
+    const int n_ctx = max_chunk_tokens;
     const int n_embd = llama_model_n_embd(model);
 
     // Open sqlite-vec store
@@ -448,59 +459,81 @@ int main(int argc, char ** argv) {
     // Phase 2: Encode chunks and insert into store
     store_begin(store);
 
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        auto & ch = chunks[i];
-        int n_tok = std::min((int)ch.tokens.size(), n_ctx);
+    for (size_t i = 0; i < chunks.size(); ) {
+        const int group = (int)std::min((size_t)slots, chunks.size() - i);
 
         llama_memory_clear(llama_get_memory(ctx), false);
-        llama_batch batch = build_single_seq_batch(ch.tokens.data(), n_tok, is_encoder);
+
+        int total_tok = 0;
+        for (int s = 0; s < group; ++s) {
+            total_tok += std::min((int)chunks[i + s].tokens.size(), n_ctx);
+        }
+
+        // One sequence per chunk; all tokens marked for output so pooling works
+        llama_batch batch = llama_batch_init(total_tok, 0, group);
+        std::vector<int> last_idx(group, -1);
+        for (int s = 0; s < group; ++s) {
+            const auto & toks = chunks[i + s].tokens;
+            const int n_tok = std::min((int)toks.size(), n_ctx);
+            for (int t = 0; t < n_tok; ++t) {
+                batch.token[batch.n_tokens]     = toks[t];
+                batch.pos[batch.n_tokens]       = t;
+                batch.n_seq_id[batch.n_tokens]  = 1;
+                batch.seq_id[batch.n_tokens][0] = s;
+                batch.logits[batch.n_tokens]    = true;
+                batch.n_tokens++;
+            }
+            last_idx[s] = batch.n_tokens - 1;
+        }
 
         if (embed_batch(ctx, batch, is_encoder) != 0) {
-            if (!g_quiet) std::cerr << "  Encode failed, skipping: " << ch.filename << std::endl;
-            if (is_encoder) llama_batch_free(batch);
+            if (!g_quiet) std::cerr << "  Encode failed, skipping " << group
+                                    << " chunk(s) starting at: " << chunks[i].filename << std::endl;
+            llama_batch_free(batch);
+            i += group;
             continue;
         }
 
-        float * emb = nullptr;
-        if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-            emb = llama_get_embeddings_ith(ctx, n_tok - 1);
-        } else {
-            emb = llama_get_embeddings_seq(ctx, 0);
-        }
+        for (int s = 0; s < group; ++s) {
+            auto & ch = chunks[i + s];
 
-        if (!emb) {
-            if (!g_quiet) std::cerr << "  Failed (no embedding): " << ch.filename << std::endl;
-            if (is_encoder) llama_batch_free(batch);
-            continue;
-        }
+            float * emb = nullptr;
+            if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
+                emb = llama_get_embeddings_ith(ctx, last_idx[s]);
+            } else {
+                emb = llama_get_embeddings_seq(ctx, s);
+            }
 
-        std::vector<float> embedding(emb, emb + n_embd);
-        normalize_embedding(embedding);
+            if (!emb) {
+                if (!g_quiet) std::cerr << "  Failed (no embedding): " << ch.filename << std::endl;
+                continue;
+            }
 
-        // Extract base filename (strip " [chunk N]" or " [MSGID]" suffix) for mtime lookup
-        std::string base_fname = ch.filename;
-        auto bracket_pos = base_fname.find(" [");
-        if (bracket_pos != std::string::npos) {
-            base_fname = base_fname.substr(0, bracket_pos);
-        }
-        int64_t mtime = (int64_t)fs::last_write_time(fs::path(base_fname)).time_since_epoch().count();
+            std::vector<float> embedding(emb, emb + n_embd);
+            normalize_embedding(embedding);
 
-        if (!ch.msgid.empty()) {
+            // Extract base filename (strip " [chunk N]" or " [MSGID]" suffix) for mtime lookup
+            std::string base_fname = ch.filename;
+            auto bracket_pos = base_fname.find(" [");
+            if (bracket_pos != std::string::npos) {
+                base_fname = base_fname.substr(0, bracket_pos);
+            }
+            int64_t mtime = (int64_t)fs::last_write_time(fs::path(base_fname)).time_since_epoch().count();
+
             ChunkMeta meta;
-            meta.msgid = ch.msgid;
-            if (!ch.msgid.empty()) meta.severity = ch.msgid.back();
+            if (!ch.msgid.empty()) {
+                meta.msgid = ch.msgid;
+                meta.severity = ch.msgid.back();
+            }
             store_insert_full(store, ch.filename, ch.snippet, source_type, mtime,
                               embedding, meta, ch.full_text);
-        } else {
-            ChunkMeta meta;
-            store_insert_full(store, ch.filename, ch.snippet, source_type, mtime,
-                              embedding, meta, ch.full_text);
         }
 
-        if (is_encoder) llama_batch_free(batch);
+        llama_batch_free(batch);
 
-        if (!g_quiet && (i + 1) % 10 == 0) {
-            std::cout << "  Encoded " << (i + 1) << "/" << chunks.size() << " chunks" << std::endl;
+        i += group;
+        if (!g_quiet && (group > 1 || i % 10 == 0)) {
+            std::cout << "  Encoded " << i << "/" << chunks.size() << " chunks" << std::endl;
         }
     }
 

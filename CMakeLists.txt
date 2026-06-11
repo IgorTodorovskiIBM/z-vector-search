@@ -3,6 +3,12 @@ project(z-vector-search C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
+# Default to an optimized build — a plain 'cmake ..' otherwise compiles
+# sqlite, sqlite-vec, and all tools at -O0.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Dependency Paths (Override with -DLLAMA_ROOT=... etc)
 if(DEFINED ENV{ZOPEN_PKGINSTALL})
     set(DEFAULT_LLAMA "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
@@ -25,7 +31,9 @@ message(STATUS "Using BLIS_ROOT: ${BLIS_ROOT}")
 # z/OS specific flags — only applied when actually building on/for z/OS so the
 # project stays buildable on macOS/Linux for development and testing.
 if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
-    set(ZOS_FLAGS "-fzos-le-char-mode=ascii -mnocsect -fno-short-enums -m64 -mzos-target=zosv2r5 -march=z13")
+    # z15 to match the llamacpp zopen build (which already requires it), and
+    # -fzvector so sqlite-vec can use the IBM Z vector distance kernels.
+    set(ZOS_FLAGS "-fzos-le-char-mode=ascii -mnocsect -fno-short-enums -m64 -mzos-target=zosv2r5 -march=z15 -fzvector")
     set(ZOS_DEFINES "-D_XOPEN_SOURCE=600 -D_ALL_SOURCE -D_OPEN_SYS_FILE_EXT=1 -D_AE_BIMODAL=1 -D_ENHANCED_ASCII_EXT=0xFFFFFFFF")
     set(ZOS_COMP_FLAGS "-fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc")
 
@@ -55,6 +63,9 @@ target_include_directories(sqlite3 PUBLIC
 
 add_library(sqlite-vec STATIC vendor/sqlite-vec.c)
 target_compile_definitions(sqlite-vec PRIVATE SQLITE_CORE)
+if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
+    target_compile_definitions(sqlite-vec PRIVATE SQLITE_VEC_ENABLE_ZVECTOR)
+endif()
 target_include_directories(sqlite-vec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/vendor>
     $<INSTALL_INTERFACE:include/vectorsearch>

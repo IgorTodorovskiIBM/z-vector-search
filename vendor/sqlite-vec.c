@@ -360,6 +360,79 @@ static double l1_f32_neon(const void *pVect1v, const void *pVect2v,
 }
 #endif
 
+#ifdef SQLITE_VEC_ENABLE_ZVECTOR
+#include <vecintrin.h>
+
+// IBM Z vector kernels (z/Architecture). f32 vector arithmetic requires the
+// Vector Enhancements Facility 1 (z14+), so build with -fzvector and
+// -march=z14 or later.
+typedef __vector float zv_f32x4;
+
+static f32 l2_sqr_float_zvector(const void *pVect1v, const void *pVect2v,
+                                const void *qty_ptr) {
+  const f32 *pVect1 = (const f32 *)pVect1v;
+  const f32 *pVect2 = (const f32 *)pVect2v;
+  size_t qty = *((const size_t *)qty_ptr);
+  size_t i = 0;
+
+  zv_f32x4 sum0 = vec_splats(0.0f);
+  zv_f32x4 sum1 = vec_splats(0.0f);
+  zv_f32x4 sum2 = vec_splats(0.0f);
+  zv_f32x4 sum3 = vec_splats(0.0f);
+
+  for (; i + 16 <= qty; i += 16) {
+    zv_f32x4 d0 = vec_sub(vec_xl(0, pVect1 + i),      vec_xl(0, pVect2 + i));
+    zv_f32x4 d1 = vec_sub(vec_xl(0, pVect1 + i + 4),  vec_xl(0, pVect2 + i + 4));
+    zv_f32x4 d2 = vec_sub(vec_xl(0, pVect1 + i + 8),  vec_xl(0, pVect2 + i + 8));
+    zv_f32x4 d3 = vec_sub(vec_xl(0, pVect1 + i + 12), vec_xl(0, pVect2 + i + 12));
+    sum0 = vec_madd(d0, d0, sum0);
+    sum1 = vec_madd(d1, d1, sum1);
+    sum2 = vec_madd(d2, d2, sum2);
+    sum3 = vec_madd(d3, d3, sum3);
+  }
+  for (; i + 4 <= qty; i += 4) {
+    zv_f32x4 d = vec_sub(vec_xl(0, pVect1 + i), vec_xl(0, pVect2 + i));
+    sum0 = vec_madd(d, d, sum0);
+  }
+  sum0 = vec_add(vec_add(sum0, sum1), vec_add(sum2, sum3));
+  f32 res = sum0[0] + sum0[1] + sum0[2] + sum0[3];
+  for (; i < qty; i++) {
+    f32 t = pVect1[i] - pVect2[i];
+    res += t * t;
+  }
+  return sqrt(res);
+}
+
+static f32 cosine_float_zvector(const void *pVect1v, const void *pVect2v,
+                                const void *qty_ptr) {
+  const f32 *pVect1 = (const f32 *)pVect1v;
+  const f32 *pVect2 = (const f32 *)pVect2v;
+  size_t qty = *((const size_t *)qty_ptr);
+  size_t i = 0;
+
+  zv_f32x4 vdot = vec_splats(0.0f);
+  zv_f32x4 vaa  = vec_splats(0.0f);
+  zv_f32x4 vbb  = vec_splats(0.0f);
+
+  for (; i + 4 <= qty; i += 4) {
+    zv_f32x4 a = vec_xl(0, pVect1 + i);
+    zv_f32x4 b = vec_xl(0, pVect2 + i);
+    vdot = vec_madd(a, b, vdot);
+    vaa  = vec_madd(a, a, vaa);
+    vbb  = vec_madd(b, b, vbb);
+  }
+  f32 dot  = vdot[0] + vdot[1] + vdot[2] + vdot[3];
+  f32 aMag = vaa[0]  + vaa[1]  + vaa[2]  + vaa[3];
+  f32 bMag = vbb[0]  + vbb[1]  + vbb[2]  + vbb[3];
+  for (; i < qty; i++) {
+    dot  += pVect1[i] * pVect2[i];
+    aMag += pVect1[i] * pVect1[i];
+    bMag += pVect2[i] * pVect2[i];
+  }
+  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+}
+#endif
+
 static f32 l2_sqr_float(const void *pVect1v, const void *pVect2v,
                         const void *qty_ptr) {
   f32 *pVect1 = (f32 *)pVect1v;
@@ -392,6 +465,11 @@ static f32 l2_sqr_int8(const void *pA, const void *pB, const void *pD) {
 }
 
 static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
+#ifdef SQLITE_VEC_ENABLE_ZVECTOR
+  if ((*(const size_t *)d) > 3) {
+    return l2_sqr_float_zvector(a, b, d);
+  }
+#endif
 #ifdef SQLITE_VEC_ENABLE_NEON
   if ((*(const size_t *)d) > 16) {
     return l2_sqr_float_neon(a, b, d);
@@ -464,6 +542,11 @@ static double distance_l1_f32(const void *a, const void *b, const void *d) {
 
 static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
                                  const void *qty_ptr) {
+#ifdef SQLITE_VEC_ENABLE_ZVECTOR
+  if ((*(const size_t *)qty_ptr) > 3) {
+    return cosine_float_zvector(pVect1v, pVect2v, qty_ptr);
+  }
+#endif
   f32 *pVect1 = (f32 *)pVect1v;
   f32 *pVect2 = (f32 *)pVect2v;
   size_t qty = *((size_t *)qty_ptr);
