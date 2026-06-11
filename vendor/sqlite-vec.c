@@ -380,21 +380,24 @@ static f32 l2_sqr_float_zvector(const void *pVect1v, const void *pVect2v,
   zv_f32x4 sum2 = vec_splats(0.0f);
   zv_f32x4 sum3 = vec_splats(0.0f);
 
+  // note: infix vector operators instead of vec_add/vec_sub - this file
+  // defines SQL functions with those names, and clang's s390 vecintrin.h
+  // does not provide them as functions anyway
   for (; i + 16 <= qty; i += 16) {
-    zv_f32x4 d0 = vec_sub(vec_xl(0, pVect1 + i),      vec_xl(0, pVect2 + i));
-    zv_f32x4 d1 = vec_sub(vec_xl(0, pVect1 + i + 4),  vec_xl(0, pVect2 + i + 4));
-    zv_f32x4 d2 = vec_sub(vec_xl(0, pVect1 + i + 8),  vec_xl(0, pVect2 + i + 8));
-    zv_f32x4 d3 = vec_sub(vec_xl(0, pVect1 + i + 12), vec_xl(0, pVect2 + i + 12));
+    zv_f32x4 d0 = vec_xl(0, pVect1 + i)      - vec_xl(0, pVect2 + i);
+    zv_f32x4 d1 = vec_xl(0, pVect1 + i + 4)  - vec_xl(0, pVect2 + i + 4);
+    zv_f32x4 d2 = vec_xl(0, pVect1 + i + 8)  - vec_xl(0, pVect2 + i + 8);
+    zv_f32x4 d3 = vec_xl(0, pVect1 + i + 12) - vec_xl(0, pVect2 + i + 12);
     sum0 = vec_madd(d0, d0, sum0);
     sum1 = vec_madd(d1, d1, sum1);
     sum2 = vec_madd(d2, d2, sum2);
     sum3 = vec_madd(d3, d3, sum3);
   }
   for (; i + 4 <= qty; i += 4) {
-    zv_f32x4 d = vec_sub(vec_xl(0, pVect1 + i), vec_xl(0, pVect2 + i));
+    zv_f32x4 d = vec_xl(0, pVect1 + i) - vec_xl(0, pVect2 + i);
     sum0 = vec_madd(d, d, sum0);
   }
-  sum0 = vec_add(vec_add(sum0, sum1), vec_add(sum2, sum3));
+  sum0 = (sum0 + sum1) + (sum2 + sum3);
   f32 res = sum0[0] + sum0[1] + sum0[2] + sum0[3];
   for (; i < qty; i++) {
     f32 t = pVect1[i] - pVect2[i];
