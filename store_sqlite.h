@@ -281,14 +281,6 @@ inline bool store_convert_vectors(StoreDB &store) {
         return false;
     }
 
-    // Show first vector's first 4 floats before swap for diagnostics
-    if (!rows.empty() && rows[0].blob.size() >= 16) {
-        float f[4];
-        memcpy(f, rows[0].blob.data(), 16);
-        std::cerr << "  Before swap [rowid " << rows[0].rowid << "]: "
-                  << f[0] << ", " << f[1] << ", " << f[2] << ", " << f[3] << std::endl;
-    }
-
     // Swap each float in each blob
     for (auto &r : rows) {
         uint32_t *floats = reinterpret_cast<uint32_t *>(r.blob.data());
@@ -296,14 +288,6 @@ inline bool store_convert_vectors(StoreDB &store) {
         for (size_t i = 0; i < n_floats; ++i) {
             floats[i] = store_bswap32(floats[i]);
         }
-    }
-
-    // Show same vector after swap
-    if (!rows.empty() && rows[0].blob.size() >= 16) {
-        float f[4];
-        memcpy(f, rows[0].blob.data(), 16);
-        std::cerr << "  After swap  [rowid " << rows[0].rowid << "]: "
-                  << f[0] << ", " << f[1] << ", " << f[2] << ", " << f[3] << std::endl;
     }
 
     // Write back using DELETE + INSERT (vec0 virtual tables may not support UPDATE)
