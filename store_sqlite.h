@@ -253,7 +253,15 @@ inline int store_check_endian(StoreDB &store) {
 // little-endian (macOS) has LE floats that read as garbage on big-endian
 // (z/OS). Run this once after transferring a DB across platforms.
 // The operation is its own inverse (swap again to convert back).
-inline bool store_convert_vectors(StoreDB &store) {
+//
+// The optional progress callback fires periodically during the write-back
+// (the slow part: DELETE+INSERT per row in the vec0 virtual table) and once
+// at completion, so callers can show a progress bar on large stores. Errors
+// still print here; informational output is the caller's job.
+inline bool store_convert_vectors(StoreDB &store,
+                                  void (*progress)(size_t done, size_t total,
+                                                   void *ctx) = nullptr,
+                                  void *progress_ctx = nullptr) {
     const char *sql_read = "SELECT rowid, embedding FROM vec_chunks;";
     sqlite3_stmt *rstmt = nullptr;
     if (sqlite3_prepare_v2(store.db, sql_read, -1, &rstmt, nullptr) != SQLITE_OK) {
@@ -307,6 +315,7 @@ inline bool store_convert_vectors(StoreDB &store) {
 
     sqlite3_exec(store.db, "BEGIN;", nullptr, nullptr, nullptr);
     int converted = 0;
+    size_t done = 0;
     for (auto &r : rows) {
         // Delete old vector
         sqlite3_bind_int64(dstmt, 1, r.rowid);
@@ -322,12 +331,14 @@ inline bool store_convert_vectors(StoreDB &store) {
             converted++;
         }
         sqlite3_reset(istmt);
+        done++;
+        if (progress && (done % 128 == 0 || done == rows.size()))
+            progress(done, rows.size(), progress_ctx);
     }
     sqlite3_exec(store.db, "COMMIT;", nullptr, nullptr, nullptr);
     sqlite3_finalize(dstmt);
     sqlite3_finalize(istmt);
 
-    std::cerr << "Converted " << converted << " vectors (" << rows.size() << " total)" << std::endl;
     return converted == (int)rows.size();
 }
 
