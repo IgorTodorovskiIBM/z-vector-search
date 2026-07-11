@@ -13,6 +13,7 @@
 #include <cstring>
 #include "llama.h"
 #include "common_store.h"
+#include "embedder.h"
 #include "store_sqlite.h"
 #include "defaults.h"
 
@@ -97,33 +98,22 @@ int main(int argc, char ** argv) {
     llama_log_set(llama_log_callback, NULL);
 
     // Initialize llama.cpp
-    llama_backend_init();
-    auto mparams = llama_model_default_params();
-    llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
-    if (!model) return 1;
+    ZvsEmbedderOptions eopts;
+    eopts.n_ctx = chunk_size + 16;
+    eopts.n_threads = n_threads;
+    ZvsEmbedder embedder;
+    if (!zvs_embedder_open(embedder, model_path, eopts)) return 1;
 
-    const struct llama_vocab * vocab = llama_model_get_vocab(model);
-    const int n_embd = llama_model_n_embd(model);
-
-    auto cparams = llama_context_default_params();
-    cparams.embeddings = true;
-    cparams.n_ctx = chunk_size + 16;
-    cparams.n_batch = chunk_size + 16;
-    cparams.n_ubatch = chunk_size + 16;
-    cparams.n_seq_max = 1;
-    cparams.n_threads = n_threads;
-    cparams.n_threads_batch = n_threads;
-    llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return 1;
-
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
-    const bool is_encoder = llama_model_has_encoder(model);
-    const int n_ctx = (int)cparams.n_ctx;
+    llama_context * ctx = embedder.ctx;
+    const struct llama_vocab * vocab = embedder.vocab;
+    const int n_embd = embedder.n_embd;
+    const bool is_encoder = embedder.is_encoder;
+    const int n_ctx = embedder.n_ctx;
 
     // Tokenize prefix once if needed
     std::vector<llama_token> prefix_tokens;
     if (use_prefix) {
-        const std::string prefix_str = "search_document: ";
+        const std::string &prefix_str = zvs_document_prefix();
         prefix_tokens.resize(prefix_str.size() + 2);
         int n = llama_tokenize(vocab, prefix_str.c_str(), prefix_str.size(),
                                prefix_tokens.data(), prefix_tokens.size(), true, true);
@@ -230,13 +220,8 @@ int main(int argc, char ** argv) {
                 continue;
             }
 
-            float * emb = (pooling_type == LLAMA_POOLING_TYPE_NONE)
-                ? llama_get_embeddings_ith(ctx, n_tok - 1)
-                : llama_get_embeddings_seq(ctx, 0);
-
-            if (emb) {
-                std::vector<float> embedding(emb, emb + n_embd);
-                normalize_embedding(embedding);
+            std::vector<float> embedding;
+            if (zvs_pool_extract(embedder, 0, n_tok - 1, embedding)) {
                 store_insert(store, ch.filename, ch.snippet, "document", 0, embedding);
                 chunks_indexed++;
             }
@@ -258,29 +243,10 @@ int main(int argc, char ** argv) {
     }
 
     // Embed the query
-    std::string q_input = use_prefix ? "search_query: " + query : query;
-    auto q_tokens = std::vector<llama_token>(q_input.size() + 2);
-    int n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(),
-                                    q_tokens.data(), q_tokens.size(), true, true);
-    if (n_q_tokens < 0) {
-        q_tokens.resize(-n_q_tokens);
-        n_q_tokens = llama_tokenize(vocab, q_input.c_str(), q_input.size(),
-                                    q_tokens.data(), q_tokens.size(), true, true);
-    }
-    q_tokens.resize(n_q_tokens);
-
-    llama_memory_clear(llama_get_memory(ctx), false);
-    llama_batch q_batch = build_single_seq_batch(q_tokens.data(), q_tokens.size(), is_encoder);
-    if (embed_batch(ctx, q_batch, is_encoder) != 0) return 1;
-    if (is_encoder) llama_batch_free(q_batch);
-
-    float * q_emb = (pooling_type == LLAMA_POOLING_TYPE_NONE)
-        ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1)
-        : llama_get_embeddings_seq(ctx, 0);
-    if (!q_emb) return 1;
-
-    std::vector<float> query_vec(q_emb, q_emb + n_embd);
-    normalize_embedding(query_vec);
+    std::vector<float> query_vec;
+    bool embedded = use_prefix ? zvs_embed_query(embedder, query, query_vec)
+                               : zvs_embed_raw(embedder, query, query_vec);
+    if (!embedded) return 1;
 
     // Search
     auto results = store_query(store, query_vec, top_k);
@@ -292,8 +258,5 @@ int main(int argc, char ** argv) {
         std::cout << "    " << r.snippet << "\n" << std::endl;
     }
 
-    llama_free(ctx);
-    llama_model_free(model);
-    llama_backend_free();
     return 0;
 }

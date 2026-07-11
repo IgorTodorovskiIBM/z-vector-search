@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include "llama.h"
 #include "common_store.h"
+#include "embedder.h"
 #include "store_sqlite.h"
 #include "defaults.h"
 
@@ -229,35 +230,31 @@ int main(int argc, char ** argv) {
     ensure_default_dir();
 
     llama_log_set(llama_log_callback, nullptr);
-    llama_backend_init();
-    auto mparams = llama_model_default_params();
-    llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
-    if (!model) return 1;
-
-    const struct llama_vocab * vocab = llama_model_get_vocab(model);
 
     // Encoder models (T5-style) keep single-sequence batches; BERT-style
     // embedding models encode several chunks per batch for larger matmuls
-    // and less per-call overhead.
-    const bool is_encoder = llama_model_has_encoder(model);
-    const int slots = is_encoder ? 1 : batch_chunks;
+    // and less per-call overhead. Whether the model is an encoder is only
+    // known after loading, so open with the batched layout optimistically
+    // and reopen single-sequence in the (rare) encoder case.
     const int max_chunk_tokens = chunk_size + 16;
+    ZvsEmbedderOptions eopts;
+    eopts.n_ctx = max_chunk_tokens * batch_chunks;
+    eopts.n_seq_max = batch_chunks;
+    eopts.n_threads = n_threads;
+    ZvsEmbedder embedder;
+    if (!zvs_embedder_open(embedder, model_path, eopts)) return 1;
+    if (embedder.is_encoder && batch_chunks > 1) {
+        eopts.n_ctx = max_chunk_tokens;
+        eopts.n_seq_max = 1;
+        if (!zvs_embedder_open(embedder, model_path, eopts)) return 1;
+    }
 
-    auto cparams = llama_context_default_params();
-    cparams.embeddings = true;
-    cparams.n_ctx = max_chunk_tokens * slots;
-    cparams.n_batch = max_chunk_tokens * slots;
-    cparams.n_ubatch = max_chunk_tokens * slots;
-    cparams.n_seq_max = slots;
-    cparams.n_threads = n_threads;
-    cparams.n_threads_batch = n_threads;
-
-    llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return 1;
-
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+    llama_context * ctx = embedder.ctx;
+    const struct llama_vocab * vocab = embedder.vocab;
+    const bool is_encoder = embedder.is_encoder;
+    const int slots = is_encoder ? 1 : batch_chunks;
     const int n_ctx = max_chunk_tokens;
-    const int n_embd = llama_model_n_embd(model);
+    const int n_embd = embedder.n_embd;
 
     // Open sqlite-vec store
     StoreDB store;
@@ -272,7 +269,7 @@ int main(int argc, char ** argv) {
     // Tokenize the prefix once if needed
     std::vector<llama_token> prefix_tokens;
     if (use_prefix) {
-        const std::string prefix_str = "search_document: ";
+        const std::string &prefix_str = zvs_document_prefix();
         prefix_tokens.resize(prefix_str.size() + 2);
         int n = llama_tokenize(vocab, prefix_str.c_str(), prefix_str.size(),
                                prefix_tokens.data(), prefix_tokens.size(), true, true);
@@ -450,9 +447,6 @@ int main(int argc, char ** argv) {
 
     if (chunks.empty()) {
         if (!g_quiet) std::cout << "Nothing to encode. Store is up to date." << std::endl;
-        llama_free(ctx);
-        llama_model_free(model);
-        llama_backend_free();
         return 0;
     }
 
@@ -497,20 +491,11 @@ int main(int argc, char ** argv) {
         for (int s = 0; s < group; ++s) {
             auto & ch = chunks[i + s];
 
-            float * emb = nullptr;
-            if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-                emb = llama_get_embeddings_ith(ctx, last_idx[s]);
-            } else {
-                emb = llama_get_embeddings_seq(ctx, s);
-            }
-
-            if (!emb) {
+            std::vector<float> embedding;
+            if (!zvs_pool_extract(embedder, s, last_idx[s], embedding)) {
                 if (!g_quiet) std::cerr << "  Failed (no embedding): " << ch.filename << std::endl;
                 continue;
             }
-
-            std::vector<float> embedding(emb, emb + n_embd);
-            normalize_embedding(embedding);
 
             // Extract base filename (strip " [chunk N]" or " [MSGID]" suffix) for mtime lookup
             std::string base_fname = ch.filename;
@@ -542,8 +527,5 @@ int main(int argc, char ** argv) {
     int total = store_count(store);
     if (!g_quiet) std::cout << "Done. Store has " << total << " total records in " << store_path << std::endl;
 
-    llama_free(ctx);
-    llama_model_free(model);
-    llama_backend_free();
     return 0;
 }

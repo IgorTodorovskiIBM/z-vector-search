@@ -21,10 +21,15 @@ else()
 endif()
 
 set(LLAMA_ROOT "${DEFAULT_LLAMA}" CACHE PATH "Path to llamacpp installation")
+# zopen bundles ggml inside the llamacpp package; Homebrew ships it as a
+# separate formula. GGML_ROOT defaults to LLAMA_ROOT so zopen/z/OS builds are
+# unchanged; macOS dev builds pass -DGGML_ROOT=/opt/homebrew/opt/ggml.
+set(GGML_ROOT "${LLAMA_ROOT}" CACHE PATH "Path to ggml installation (defaults to LLAMA_ROOT)")
 set(ZOSLIB_ROOT "${DEFAULT_ZOSLIB}" CACHE PATH "Path to zoslib installation")
 set(BLIS_ROOT "${DEFAULT_BLIS}" CACHE PATH "Path to blis installation")
 
 message(STATUS "Using LLAMA_ROOT: ${LLAMA_ROOT}")
+message(STATUS "Using GGML_ROOT: ${GGML_ROOT}")
 message(STATUS "Using ZOSLIB_ROOT: ${ZOSLIB_ROOT}")
 message(STATUS "Using BLIS_ROOT: ${BLIS_ROOT}")
 
@@ -45,6 +50,9 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${LLAMA_ROOT}/include)
 include_directories(${LLAMA_ROOT})
+if(NOT GGML_ROOT STREQUAL LLAMA_ROOT)
+    include_directories(${GGML_ROOT}/include)
+endif()
 include_directories(${ZOSLIB_ROOT}/include)
 include_directories(${BLIS_ROOT}/include)
 
@@ -97,10 +105,10 @@ function(find_zopen_lib VAR NAME ROOT)
 endfunction()
 
 find_zopen_lib(LIB_LLAMA llama ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML ggml ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML_BASE ggml-base ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML_CPU ggml-cpu ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML_BLAS ggml-blas ${LLAMA_ROOT})
+find_zopen_lib(LIB_GGML ggml ${GGML_ROOT})
+find_zopen_lib(LIB_GGML_BASE ggml-base ${GGML_ROOT})
+find_zopen_lib(LIB_GGML_CPU ggml-cpu ${GGML_ROOT})
+find_zopen_lib(LIB_GGML_BLAS ggml-blas ${GGML_ROOT})
 find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
 find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
 find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
@@ -173,6 +181,7 @@ install(FILES
     common_store.h
     hybrid_search.h
     defaults.h
+    embedder.h
     msg_filter.h
     console_parse.h
     DESTINATION include/vectorsearch

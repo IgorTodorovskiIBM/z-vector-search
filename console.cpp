@@ -15,6 +15,7 @@
 #include <fstream>
 #include "llama.h"
 #include "common_store.h"
+#include "embedder.h"
 #include "store_sqlite.h"
 #include "defaults.h"
 #include "msg_filter.h"
@@ -994,25 +995,10 @@ int main(int argc, char ** argv) {
     // Initialize llama.cpp
     auto t_model_start = std::chrono::steady_clock::now();
     llama_log_set(llama_log_callback, NULL);
-    llama_backend_init();
 
-    auto mparams = llama_model_default_params();
-    llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
-    if (!model) return 1;
-
-    const struct llama_vocab * vocab = llama_model_get_vocab(model);
-    const int n_embd = llama_model_n_embd(model);
-
-    auto cparams = llama_context_default_params();
-    cparams.embeddings = true;
-    cparams.n_ctx = 2048;
-    cparams.n_batch = 2048;
-    cparams.n_ubatch = 2048;
-    llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return 1;
-
-    const bool is_encoder = llama_model_has_encoder(model);
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+    ZvsEmbedder embedder;
+    if (!zvs_embedder_open(embedder, model_path)) return 1;
+    const int n_embd = embedder.n_embd;
 
     metrics.model_load_ms = ms_since(t_model_start);
 
@@ -1072,35 +1058,14 @@ int main(int argc, char ** argv) {
 
             // Build a search query from the message ID and full text
             std::string query_text = msg.msgid + " " + msg.text;
-            if (use_prefix) query_text = "search_query: " + query_text;
 
-            // Tokenize and embed
+            // Embed
             auto t_embed_start = std::chrono::steady_clock::now();
-            auto q_tokens = std::vector<llama_token>(query_text.size() + 2);
-            int n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
-                                     q_tokens.data(), q_tokens.size(), true, true);
-            if (n_q < 0) {
-                q_tokens.resize(-n_q);
-                n_q = llama_tokenize(vocab, query_text.c_str(), query_text.size(),
-                                     q_tokens.data(), q_tokens.size(), true, true);
-            }
-            q_tokens.resize(n_q);
-
-            llama_memory_clear(llama_get_memory(ctx), false);
-            llama_batch batch = build_single_seq_batch(q_tokens.data(), q_tokens.size(), is_encoder);
-            if (embed_batch(ctx, batch, is_encoder) != 0) {
-                if (is_encoder) llama_batch_free(batch);
-                continue;
-            }
-            if (is_encoder) llama_batch_free(batch);
-
-            float * q_emb = (pooling_type == LLAMA_POOLING_TYPE_NONE)
-                ? llama_get_embeddings_ith(ctx, q_tokens.size() - 1)
-                : llama_get_embeddings_seq(ctx, 0);
-            if (!q_emb) continue;
-
-            std::vector<float> query_vec(q_emb, q_emb + n_embd);
-            normalize_embedding(query_vec);
+            std::vector<float> query_vec;
+            bool embedded = use_prefix
+                ? zvs_embed_query(embedder, query_text, query_vec)
+                : zvs_embed_raw(embedder, query_text, query_vec);
+            if (!embedded) continue;
             metrics.total_embed_ms += ms_since(t_embed_start);
 
             // Two-phase hybrid lookup:
@@ -1248,8 +1213,5 @@ int main(int argc, char ** argv) {
                   << "}" << std::endl;
     }
 
-    llama_free(ctx);
-    llama_model_free(model);
-    llama_backend_free();
     return 0;
 }
