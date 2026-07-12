@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include "llama.h"
 #include "common_store.h"
+#include "embedder.h"
 #include "store_sqlite.h"
 #include "defaults.h"
 #include "msg_filter.h"
@@ -192,43 +193,13 @@ int main(int argc, char ** argv) {
         std::cout << std::endl;
     }
 
-    // Initialize llama.cpp
-    llama_backend_init();
-    auto mparams = llama_model_default_params();
-    llama_model * model = llama_model_load_from_file(model_path.c_str(), mparams);
-    if (!model) return 1;
-
-    const struct llama_vocab * vocab = llama_model_get_vocab(model);
-    const int n_embd = llama_model_n_embd(model);
-
-    // Use a context large enough for console chunks
-    int ctx_size = 512;
-    auto cparams = llama_context_default_params();
-    cparams.embeddings = true;
-    cparams.n_ctx = ctx_size;
-    cparams.n_batch = ctx_size;
-    cparams.n_ubatch = ctx_size;
-    cparams.n_seq_max = 1;
-    cparams.n_threads = n_threads;
-    cparams.n_threads_batch = n_threads;
-
-    llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return 1;
-
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
-    const bool is_encoder = llama_model_has_encoder(model);
-    const int n_ctx = (int)cparams.n_ctx;
-
-    // Tokenize prefix once if needed
-    std::vector<llama_token> prefix_tokens;
-    if (use_prefix) {
-        const std::string prefix_str = "search_document: ";
-        prefix_tokens.resize(prefix_str.size() + 2);
-        int n = llama_tokenize(vocab, prefix_str.c_str(), prefix_str.size(),
-                               prefix_tokens.data(), prefix_tokens.size(), true, true);
-        if (n > 0) prefix_tokens.resize(n);
-        else prefix_tokens.clear();
-    }
+    // Initialize llama.cpp — context sized for console chunks
+    ZvsEmbedderOptions eopts;
+    eopts.n_ctx = 512;
+    eopts.n_threads = n_threads;
+    ZvsEmbedder embedder;
+    if (!zvs_embedder_open(embedder, model_path, eopts)) return 1;
+    const int n_embd = embedder.n_embd;
 
     // Open store
     StoreDB store;
@@ -264,57 +235,15 @@ int main(int argc, char ** argv) {
             new_hwm = chunk_name;
         }
 
-        // Tokenize the chunk text
-        std::string text_to_encode = chunk.text;
-        // Truncate to fit context if needed
-        auto all_tokens = std::vector<llama_token>(text_to_encode.size() + 2);
-        int n_tokens = llama_tokenize(vocab, text_to_encode.c_str(), text_to_encode.size(),
-                                      all_tokens.data(), all_tokens.size(),
-                                      !use_prefix, true);
-        if (n_tokens < 0) {
-            all_tokens.resize(-n_tokens);
-            n_tokens = llama_tokenize(vocab, text_to_encode.c_str(), text_to_encode.size(),
-                                      all_tokens.data(), all_tokens.size(),
-                                      !use_prefix, true);
-        }
-        all_tokens.resize(n_tokens);
-
-        // Prepend prefix tokens if needed
-        std::vector<llama_token> tokens;
-        if (use_prefix && !prefix_tokens.empty()) {
-            tokens = prefix_tokens;
-            tokens.insert(tokens.end(), all_tokens.begin(), all_tokens.end());
-        } else {
-            tokens = std::move(all_tokens);
-        }
-
-        // Truncate to context size
-        int n_tok = std::min((int)tokens.size(), n_ctx);
-
-        // Encode
-        llama_memory_clear(llama_get_memory(ctx), false);
-        llama_batch batch = build_single_seq_batch(tokens.data(), n_tok, is_encoder);
-
-        if (embed_batch(ctx, batch, is_encoder) != 0) {
+        // Embed the chunk text (truncated to the context size inside)
+        std::vector<float> embedding;
+        bool embedded = use_prefix
+            ? zvs_embed_document(embedder, chunk.text, embedding)
+            : zvs_embed_raw(embedder, chunk.text, embedding);
+        if (!embedded) {
             if (!g_quiet) std::cerr << "  Encode failed: " << chunk_name << std::endl;
-            if (is_encoder) llama_batch_free(batch);
             continue;
         }
-
-        float * emb = nullptr;
-        if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-            emb = llama_get_embeddings_ith(ctx, n_tok - 1);
-        } else {
-            emb = llama_get_embeddings_seq(ctx, 0);
-        }
-
-        if (!emb) {
-            if (is_encoder) llama_batch_free(batch);
-            continue;
-        }
-
-        std::vector<float> embedding(emb, emb + n_embd);
-        normalize_embedding(embedding);
 
         // Insert into store
         // filename = "operlog/SYSNAME/start-end"
@@ -324,8 +253,6 @@ int main(int argc, char ** argv) {
 
         store_insert_full(store, chunk_name, chunk.snippet, "operlog", 0, embedding, meta, chunk.text);
         inserted++;
-
-        if (is_encoder) llama_batch_free(batch);
 
         if (!g_quiet && (ci + 1) % 10 == 0) {
             std::cout << "  Encoded " << (ci + 1) << "/" << chunks.size() << " chunks" << std::endl;
@@ -345,8 +272,5 @@ int main(int argc, char ** argv) {
                   << " (already indexed). Store has " << total << " total records." << std::endl;
     }
 
-    llama_free(ctx);
-    llama_model_free(model);
-    llama_backend_free();
     return 0;
 }
