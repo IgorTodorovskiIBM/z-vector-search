@@ -521,11 +521,6 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
                                             const std::string &source_type_filter = "") {
     std::vector<QueryResult> results;
 
-    // sqlite-vec KNN query — fetch extra results when filtering, then trim.
-    // Use 50x to handle sparse source_type buckets (e.g. cc_error_fix is
-    // ~7% of a mixed corpus — 5x would miss it entirely with top_k=1).
-    int fetch_k = source_type_filter.empty() ? top_k : top_k * 50;
-
     // Provenance columns are added by store_migrate, but static DBs opened via
     // store_open_ibm are never migrated. Select literals in their place so the
     // query still prepares against pre-provenance schemas (column order is
@@ -535,6 +530,13 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         ? "c.pair_id, c.origin, c.author, c.verified "
         : "'' AS pair_id, '' AS origin, '' AS author, 0 AS verified ";
 
+    // A source_type filter is pushed into the KNN as a rowid IN (...)
+    // constraint (sqlite-vec consumes it via sqlite3_vtab_in; the bundled
+    // SQLite is well past the 3.38 floor), so the search ranks within the
+    // bucket and k = top_k is exact. The previous global-KNN-then-post-filter
+    // approach (k = top_k*50) returned nothing for sparse buckets whose rows
+    // all rank below the global top k*50 — e.g. a 110-chunk doc namespace in
+    // a ~14k-chunk store.
     std::string sql =
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
         "c.msgid, c.severity, c.jobname, c.sysname, c.ts_start, c.ts_end, "
@@ -542,8 +544,10 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         "FROM vec_chunks v "
         "INNER JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? "
-        "AND k = ? "
-        "ORDER BY v.distance;";
+        "AND k = ? ";
+    if (!source_type_filter.empty())
+        sql += "AND v.rowid IN (SELECT id FROM chunks WHERE source_type = ?) ";
+    sql += "ORDER BY v.distance;";
 
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(store.db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
@@ -553,7 +557,10 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
 
     sqlite3_bind_blob(stmt, 1, query_embedding.data(),
                       query_embedding.size() * sizeof(float), SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, fetch_k);
+    sqlite3_bind_int(stmt, 2, top_k);
+    if (!source_type_filter.empty())
+        sqlite3_bind_text(stmt, 3, source_type_filter.c_str(), -1,
+                          SQLITE_TRANSIENT);
 
     auto col_str = [](sqlite3_stmt *s, int col) -> std::string {
         const char *v = (const char *)sqlite3_column_text(s, col);
@@ -561,7 +568,7 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
     };
 
     int step_rc = sqlite3_step(stmt);
-    if (step_rc != SQLITE_ROW) {
+    if (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE) {
         std::cerr << "vec query: step returned " << step_rc
                   << " (" << sqlite3_errmsg(store.db) << ")" << std::endl;
     }
@@ -571,15 +578,6 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         {
             std::string src = col_str(stmt, 4);
             if (src == "operlog_meta") {
-                step_rc = sqlite3_step(stmt);
-                continue;
-            }
-        }
-
-        // Post-filter by source_type if requested
-        if (!source_type_filter.empty()) {
-            std::string src = col_str(stmt, 4);
-            if (src != source_type_filter) {
                 step_rc = sqlite3_step(stmt);
                 continue;
             }
