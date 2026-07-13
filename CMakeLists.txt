@@ -25,6 +25,29 @@ set(LLAMA_ROOT "${DEFAULT_LLAMA}" CACHE PATH "Path to llamacpp installation")
 # separate formula. GGML_ROOT defaults to LLAMA_ROOT so zopen/z/OS builds are
 # unchanged; macOS dev builds pass -DGGML_ROOT=/opt/homebrew/opt/ggml.
 set(GGML_ROOT "${LLAMA_ROOT}" CACHE PATH "Path to ggml installation (defaults to LLAMA_ROOT)")
+
+# Homebrew (macOS and Linux) ships ggml as its own keg, separate from
+# llama.cpp — the GGML_ROOT = LLAMA_ROOT default has neither its headers nor
+# its libraries. When that default holds and no ggml library sits under it,
+# resolve the conventional keg locations up front so the header search and
+# the library search below both use the real prefix. Without this a brew
+# build configured with only a warning and then failed at link time
+# ("libggml.so.0: DSO missing from command line" — GNU ld won't resolve
+# symbols from a transitive DT_NEEDED of libllama). On z/OS the brew paths
+# never exist, so the probe is a no-op and zopen layouts are unchanged.
+if(GGML_ROOT STREQUAL "${LLAMA_ROOT}"
+   AND NOT EXISTS "${GGML_ROOT}/lib/libggml.a"
+   AND NOT EXISTS "${GGML_ROOT}/lib/libggml.dylib"
+   AND NOT EXISTS "${GGML_ROOT}/lib/libggml.so")
+    foreach(P "$ENV{HOMEBREW_PREFIX}/opt/ggml" "/opt/homebrew/opt/ggml"
+              "/usr/local/opt/ggml" "/home/linuxbrew/.linuxbrew/opt/ggml")
+        if(EXISTS "${P}/lib")
+            set(GGML_ROOT "${P}")
+            message(STATUS "ggml not under LLAMA_ROOT — using ${GGML_ROOT}")
+            break()
+        endif()
+    endforeach()
+endif()
 set(ZOSLIB_ROOT "${DEFAULT_ZOSLIB}" CACHE PATH "Path to zoslib installation")
 set(BLIS_ROOT "${DEFAULT_BLIS}" CACHE PATH "Path to blis installation")
 
@@ -113,7 +136,20 @@ find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
 find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
 find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
 
-# Check each one and warn if missing (some older versions might not have all ggml-* libs)
+# llama and ggml are hard requirements: embedder.h calls ggml directly
+# (ggml_backend_dev_by_type), so every tool needs both on its link line.
+# Fail at configure time with a hint instead of at link time.
+foreach(L LIB_LLAMA LIB_GGML)
+    if(NOT ${L})
+        message(FATAL_ERROR
+            "${L} not found. The embedder requires llama.cpp and ggml; "
+            "pass -DLLAMA_ROOT=<prefix> and/or -DGGML_ROOT=<prefix> "
+            "(Homebrew: -DGGML_ROOT=$(brew --prefix ggml)).")
+    endif()
+endforeach()
+
+# Check the rest and warn if missing (some older versions might not have all
+# ggml-* split libs; blis/zoslib are z/OS-only).
 set(LLAMA_LIBS "")
 foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS LIB_MTMD LIB_BLIS LIB_ZOSLIB)
     if(${L})
