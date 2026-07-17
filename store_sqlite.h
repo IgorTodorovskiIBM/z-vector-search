@@ -220,39 +220,152 @@ inline bool store_open_ibm(StoreDB &store, const std::string &path) {
     return true;
 }
 
-// Check if vectors in the store are in native byte order.
-// Returns: 1 = native (no conversion needed), 0 = foreign (needs conversion), -1 = no vectors
-inline int store_check_endian(StoreDB &store) {
-    const char *sql = "SELECT embedding FROM vec_chunks LIMIT 1;";
-    sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(store.db, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+// ── Auxiliary vector tables ──────────────────────────────────────────────────
+// A store may carry more than one embedding per chunk: additional vec0 tables
+// keyed by the same chunks.id (e.g. the same record embedded on two different
+// text views). "vec_chunks" is always the primary; auxiliary tables are opt-in,
+// created by whoever owns their coverage contract. Everything below that walks
+// "the store's vectors" (endian check/convert, per-file delete) covers all of
+// them, so an aux table can never silently rot in a transferred or pruned DB.
 
-    int result = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        int nbytes = sqlite3_column_bytes(stmt, 0);
-        const uint8_t *data = (const uint8_t *)sqlite3_column_blob(stmt, 0);
-        if (data && nbytes >= 16) {
-            float f[4];
-            memcpy(f, data, 16);
-            bool all_valid = true;
-            for (int i = 0; i < 4; i++) {
-                if (std::isnan(f[i]) || std::isinf(f[i]) || fabsf(f[i]) > 2.0f) {
-                    all_valid = false;
-                    break;
-                }
-            }
-            result = all_valid ? 1 : 0;
-        }
+// Table names cannot be bound as SQL parameters, so the aux-vector API
+// interpolates them — accept identifier characters only, so a caller can
+// never smuggle SQL through a table name.
+inline bool store_valid_vec_table(const std::string &name) {
+    if (name.empty() || (name[0] >= '0' && name[0] <= '9')) return false;
+    for (char c : name) {
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_';
+        if (!ok) return false;
     }
-    sqlite3_finalize(stmt);
-    return result;
+    return true;
 }
 
-// Byte-swap all float vectors in the vec_chunks table.
+// All real vec0 virtual tables in the store, primary ("vec_chunks") first.
+// Matching on the stored DDL ("CREATE VIRTUAL TABLE … USING vec0") excludes
+// the shadow tables sqlite-vec creates alongside each virtual table — those
+// are plain CREATE TABLE and must never be touched directly.
+inline std::vector<std::string> store_list_vec_tables(sqlite3 *db) {
+    std::vector<std::string> tables;
+    const char *sql =
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND sql LIKE 'CREATE VIRTUAL TABLE%USING vec0%' "
+        "ORDER BY name != 'vec_chunks', name;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return tables;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        if (n) tables.push_back(n);
+    }
+    sqlite3_finalize(stmt);
+    return tables;
+}
+
+inline bool store_has_vec_table(sqlite3 *db, const std::string &name) {
+    if (!store_valid_vec_table(name)) return false;
+    const char *sql =
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? "
+        "AND sql LIKE 'CREATE VIRTUAL TABLE%USING vec0%' LIMIT 1;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+    bool found = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+// Create an auxiliary vec0 table with the store's dimensionality if it does
+// not exist. Requires a store opened with store_open (n_embd known) — the
+// lightweight opens don't carry the dimension.
+inline bool store_ensure_vec_table(StoreDB &store, const std::string &name) {
+    if (!store_valid_vec_table(name) || store.n_embd <= 0) return false;
+    std::string sql =
+        "CREATE VIRTUAL TABLE IF NOT EXISTS " + name + " USING vec0("
+        "  embedding float[" + std::to_string(store.n_embd) + "]"
+        ");";
+    char *err = nullptr;
+    if (sqlite3_exec(store.db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+        std::cerr << "create " << name << ": " << (err ? err : "unknown") << std::endl;
+        sqlite3_free(err);
+        return false;
+    }
+    return true;
+}
+
+// Attach an embedding to an existing chunk under an auxiliary table.
+// rowid must be a chunks.id (typically the return of store_insert_full).
+inline bool store_insert_vec(StoreDB &store, const std::string &table,
+                             int64_t rowid, const std::vector<float> &embedding) {
+    if (!store_valid_vec_table(table)) return false;
+    std::string sql = "INSERT INTO " + table + "(rowid, embedding) VALUES(?, ?);";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "prepare " << table << " insert: " << sqlite3_errmsg(store.db) << std::endl;
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_blob(stmt, 2, embedding.data(),
+                      embedding.size() * sizeof(float), SQLITE_STATIC);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!ok)
+        std::cerr << "insert " << table << ": " << sqlite3_errmsg(store.db) << std::endl;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+// Remove one chunk's embedding from one vec0 table (no-op if absent).
+inline void store_delete_vec(StoreDB &store, const std::string &table, int64_t rowid) {
+    if (!store_valid_vec_table(table)) return;
+    std::string sql = "DELETE FROM " + table + " WHERE rowid = ?;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(store.db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, rowid);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+// Check if vectors in the store are in native byte order. Samples the first
+// row of the first vec0 table that has one (vec_chunks first).
+// Returns: 1 = native (no conversion needed), 0 = foreign (needs conversion), -1 = no vectors
+inline int store_check_endian(StoreDB &store) {
+    for (const auto &table : store_list_vec_tables(store.db)) {
+        std::string sql = "SELECT embedding FROM " + table + " LIMIT 1;";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(store.db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+            continue;
+
+        int result = -1;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int nbytes = sqlite3_column_bytes(stmt, 0);
+            const uint8_t *data = (const uint8_t *)sqlite3_column_blob(stmt, 0);
+            if (data && nbytes >= 16) {
+                float f[4];
+                memcpy(f, data, 16);
+                bool all_valid = true;
+                for (int i = 0; i < 4; i++) {
+                    if (std::isnan(f[i]) || std::isinf(f[i]) || fabsf(f[i]) > 2.0f) {
+                        all_valid = false;
+                        break;
+                    }
+                }
+                result = all_valid ? 1 : 0;
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (result != -1) return result;
+    }
+    return -1;
+}
+
+// Byte-swap all float vectors in every vec0 table of the store.
 // sqlite-vec interprets blobs in native byte order, so a DB built on
 // little-endian (macOS) has LE floats that read as garbage on big-endian
 // (z/OS). Run this once after transferring a DB across platforms.
 // The operation is its own inverse (swap again to convert back).
+// Covering every table (not just vec_chunks) keeps a store's embeddings in
+// one byte order — a half-converted store would pass the endian check on
+// vec_chunks while an auxiliary table still reads garbage.
 //
 // The optional progress callback fires periodically during the write-back
 // (the slow part: DELETE+INSERT per row in the vec0 virtual table) and once
@@ -262,84 +375,100 @@ inline bool store_convert_vectors(StoreDB &store,
                                   void (*progress)(size_t done, size_t total,
                                                    void *ctx) = nullptr,
                                   void *progress_ctx = nullptr) {
-    const char *sql_read = "SELECT rowid, embedding FROM vec_chunks;";
-    sqlite3_stmt *rstmt = nullptr;
-    if (sqlite3_prepare_v2(store.db, sql_read, -1, &rstmt, nullptr) != SQLITE_OK) {
-        std::cerr << "convert: prepare read: " << sqlite3_errmsg(store.db) << std::endl;
-        return false;
-    }
-
     struct VecRow { int64_t rowid; std::vector<uint8_t> blob; };
-    std::vector<VecRow> rows;
+    struct TableRows { std::string table; std::vector<VecRow> rows; };
+    std::vector<TableRows> tables;
+    size_t total = 0;
 
-    while (sqlite3_step(rstmt) == SQLITE_ROW) {
-        VecRow r;
-        r.rowid = sqlite3_column_int64(rstmt, 0);
-        int nbytes = sqlite3_column_bytes(rstmt, 1);
-        const uint8_t *data = (const uint8_t *)sqlite3_column_blob(rstmt, 1);
-        if (data && nbytes > 0) {
-            r.blob.assign(data, data + nbytes);
-            rows.push_back(std::move(r));
+    for (const auto &table : store_list_vec_tables(store.db)) {
+        std::string sql_read = "SELECT rowid, embedding FROM " + table + ";";
+        sqlite3_stmt *rstmt = nullptr;
+        if (sqlite3_prepare_v2(store.db, sql_read.c_str(), -1, &rstmt, nullptr) != SQLITE_OK) {
+            std::cerr << "convert: prepare read " << table << ": "
+                      << sqlite3_errmsg(store.db) << std::endl;
+            return false;
         }
+        TableRows tr;
+        tr.table = table;
+        while (sqlite3_step(rstmt) == SQLITE_ROW) {
+            VecRow r;
+            r.rowid = sqlite3_column_int64(rstmt, 0);
+            int nbytes = sqlite3_column_bytes(rstmt, 1);
+            const uint8_t *data = (const uint8_t *)sqlite3_column_blob(rstmt, 1);
+            if (data && nbytes > 0) {
+                r.blob.assign(data, data + nbytes);
+                tr.rows.push_back(std::move(r));
+            }
+        }
+        sqlite3_finalize(rstmt);
+        total += tr.rows.size();
+        if (!tr.rows.empty()) tables.push_back(std::move(tr));
     }
-    sqlite3_finalize(rstmt);
 
-    if (rows.empty()) {
+    if (total == 0) {
         std::cerr << "convert: no vectors found" << std::endl;
         return false;
     }
 
     // Swap each float in each blob
-    for (auto &r : rows) {
-        uint32_t *floats = reinterpret_cast<uint32_t *>(r.blob.data());
-        size_t n_floats = r.blob.size() / sizeof(uint32_t);
-        for (size_t i = 0; i < n_floats; ++i) {
-            floats[i] = store_bswap32(floats[i]);
+    for (auto &tr : tables) {
+        for (auto &r : tr.rows) {
+            uint32_t *floats = reinterpret_cast<uint32_t *>(r.blob.data());
+            size_t n_floats = r.blob.size() / sizeof(uint32_t);
+            for (size_t i = 0; i < n_floats; ++i) {
+                floats[i] = store_bswap32(floats[i]);
+            }
         }
     }
 
     // Write back using DELETE + INSERT (vec0 virtual tables may not support UPDATE)
-    const char *sql_del = "DELETE FROM vec_chunks WHERE rowid = ?;";
-    const char *sql_ins = "INSERT INTO vec_chunks(rowid, embedding) VALUES(?, ?);";
-    sqlite3_stmt *dstmt = nullptr;
-    sqlite3_stmt *istmt = nullptr;
-    if (sqlite3_prepare_v2(store.db, sql_del, -1, &dstmt, nullptr) != SQLITE_OK) {
-        std::cerr << "convert: prepare delete: " << sqlite3_errmsg(store.db) << std::endl;
-        return false;
-    }
-    if (sqlite3_prepare_v2(store.db, sql_ins, -1, &istmt, nullptr) != SQLITE_OK) {
-        std::cerr << "convert: prepare insert: " << sqlite3_errmsg(store.db) << std::endl;
-        sqlite3_finalize(dstmt);
-        return false;
-    }
-
     sqlite3_exec(store.db, "BEGIN;", nullptr, nullptr, nullptr);
-    int converted = 0;
-    size_t done = 0;
-    for (auto &r : rows) {
-        // Delete old vector
-        sqlite3_bind_int64(dstmt, 1, r.rowid);
-        sqlite3_step(dstmt);
-        sqlite3_reset(dstmt);
-
-        // Insert swapped vector
-        sqlite3_bind_int64(istmt, 1, r.rowid);
-        sqlite3_bind_blob(istmt, 2, r.blob.data(), r.blob.size(), SQLITE_STATIC);
-        if (sqlite3_step(istmt) != SQLITE_DONE) {
-            std::cerr << "convert: insert rowid " << r.rowid << ": " << sqlite3_errmsg(store.db) << std::endl;
-        } else {
-            converted++;
+    size_t converted = 0, done = 0;
+    for (auto &tr : tables) {
+        std::string sql_del = "DELETE FROM " + tr.table + " WHERE rowid = ?;";
+        std::string sql_ins = "INSERT INTO " + tr.table + "(rowid, embedding) VALUES(?, ?);";
+        sqlite3_stmt *dstmt = nullptr;
+        sqlite3_stmt *istmt = nullptr;
+        if (sqlite3_prepare_v2(store.db, sql_del.c_str(), -1, &dstmt, nullptr) != SQLITE_OK) {
+            std::cerr << "convert: prepare delete " << tr.table << ": "
+                      << sqlite3_errmsg(store.db) << std::endl;
+            sqlite3_exec(store.db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
         }
-        sqlite3_reset(istmt);
-        done++;
-        if (progress && (done % 128 == 0 || done == rows.size()))
-            progress(done, rows.size(), progress_ctx);
+        if (sqlite3_prepare_v2(store.db, sql_ins.c_str(), -1, &istmt, nullptr) != SQLITE_OK) {
+            std::cerr << "convert: prepare insert " << tr.table << ": "
+                      << sqlite3_errmsg(store.db) << std::endl;
+            sqlite3_finalize(dstmt);
+            sqlite3_exec(store.db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+
+        for (auto &r : tr.rows) {
+            // Delete old vector
+            sqlite3_bind_int64(dstmt, 1, r.rowid);
+            sqlite3_step(dstmt);
+            sqlite3_reset(dstmt);
+
+            // Insert swapped vector
+            sqlite3_bind_int64(istmt, 1, r.rowid);
+            sqlite3_bind_blob(istmt, 2, r.blob.data(), r.blob.size(), SQLITE_STATIC);
+            if (sqlite3_step(istmt) != SQLITE_DONE) {
+                std::cerr << "convert: insert " << tr.table << " rowid " << r.rowid
+                          << ": " << sqlite3_errmsg(store.db) << std::endl;
+            } else {
+                converted++;
+            }
+            sqlite3_reset(istmt);
+            done++;
+            if (progress && (done % 128 == 0 || done == total))
+                progress(done, total, progress_ctx);
+        }
+        sqlite3_finalize(dstmt);
+        sqlite3_finalize(istmt);
     }
     sqlite3_exec(store.db, "COMMIT;", nullptr, nullptr, nullptr);
-    sqlite3_finalize(dstmt);
-    sqlite3_finalize(istmt);
 
-    return converted == (int)rows.size();
+    return converted == total;
 }
 
 // Get a map of base_filename -> mtime for all indexed files.
@@ -380,16 +509,11 @@ inline void store_delete_file(StoreDB &store, const std::string &filename) {
     }
     sqlite3_finalize(stmt);
 
-    // Delete from vec table
-    for (int64_t id : ids) {
-        const char *sql_del_vec = "DELETE FROM vec_chunks WHERE rowid = ?;";
-        sqlite3_stmt *dv = nullptr;
-        if (sqlite3_prepare_v2(store.db, sql_del_vec, -1, &dv, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(dv, 1, id);
-            sqlite3_step(dv);
-            sqlite3_finalize(dv);
-        }
-    }
+    // Delete from every vec0 table — an auxiliary table left holding a
+    // deleted chunk's rowid would resurrect it in that table's KNN results.
+    for (const auto &table : store_list_vec_tables(store.db))
+        for (int64_t id : ids)
+            store_delete_vec(store, table, id);
 
     // Delete from metadata table
     const char *sql_del_meta = "DELETE FROM chunks WHERE filename = ? OR filename LIKE ?;";
@@ -515,11 +639,19 @@ struct QueryResult {
 
 // Query for top-k most similar chunks to the given embedding.
 // Optionally filter by source_type.
+// vec_table selects which of the store's vec0 tables to rank by (see the
+// auxiliary-table section above); every table joins the same chunks rows,
+// so results differ only in which embedding did the ranking.
 inline std::vector<QueryResult> store_query(StoreDB &store,
                                             const std::vector<float> &query_embedding,
                                             int top_k,
-                                            const std::string &source_type_filter = "") {
+                                            const std::string &source_type_filter = "",
+                                            const std::string &vec_table = "vec_chunks") {
     std::vector<QueryResult> results;
+    if (!store_valid_vec_table(vec_table)) {
+        std::cerr << "store_query: invalid vec table '" << vec_table << "'" << std::endl;
+        return results;
+    }
 
     // Provenance columns are added by store_migrate, but static DBs opened via
     // store_open_ibm are never migrated. Select literals in their place so the
@@ -541,7 +673,7 @@ inline std::vector<QueryResult> store_query(StoreDB &store,
         "SELECT v.rowid, v.distance, c.filename, c.snippet, c.source_type, "
         "c.msgid, c.severity, c.jobname, c.sysname, c.ts_start, c.ts_end, "
         "c.julian_date, c.msg_count, c.full_text, " + prov_cols +
-        "FROM vec_chunks v "
+        "FROM " + vec_table + " v "
         "INNER JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? "
         "AND k = ? ";
