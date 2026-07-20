@@ -184,6 +184,11 @@ endif()
 add_executable(z-setup setup.cpp)
 target_link_libraries(z-setup ${SETUP_LIBS})
 
+# Store-layer self-test (sqlite-only, not installed). Run manually:
+#   ./store-selftest <scratch-dir>
+add_executable(store-selftest tests/store_selftest.cpp)
+target_link_libraries(store-selftest ${SETUP_LIBS})
+
 install(TARGETS z-index z-query z-vector-search z-console z-ingest-console z-setup DESTINATION bin)
 
 # ---- IBM messages DB parts ----
