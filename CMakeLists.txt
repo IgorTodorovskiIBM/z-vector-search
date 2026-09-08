@@ -130,20 +130,33 @@ function(find_zopen_lib VAR NAME ROOT)
     endif()
 endfunction()
 
-find_zopen_lib(LIB_LLAMA llama ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML ggml ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_BASE ggml-base ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_CPU ggml-cpu ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_BLAS ggml-blas ${GGML_ROOT})
+# An empty root means the environment did not supply one -- typically
+# ${LLAMACPP_HOME} expanding to nothing because the installed llamacpp package
+# exports a differently-named variable. Say so, rather than letting every
+# find_zopen_lib call below fail on its argument count.
+foreach(R LLAMA_ROOT GGML_ROOT)
+    if(NOT ${R})
+        message(FATAL_ERROR
+            "${R} is empty. Pass -D${R}=<prefix>; under zopen it comes from "
+            "LLAMACPP_HOME, so check that the installed llamacpp package "
+            "exports it.")
+    endif()
+endforeach()
+
+find_zopen_lib(LIB_LLAMA llama "${LLAMA_ROOT}")
+find_zopen_lib(LIB_GGML ggml "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_BASE ggml-base "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_CPU ggml-cpu "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_BLAS ggml-blas "${GGML_ROOT}")
 # libggml.a carries an undefined ggml_backend_zdnn_reg when llama.cpp is built
 # with GGML_ZDNN=ON, and libggml-zdnn.a in turn needs the zdnn library itself.
 # Without both on the link line the symbol is left for run-time DLL resolution,
 # which sends the binary looking for libzdnn.so.
-find_zopen_lib(LIB_GGML_ZDNN ggml-zdnn ${GGML_ROOT})
-find_zopen_lib(LIB_ZDNN zdnn ${ZDNN_ROOT})
-find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
-find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
-find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
+find_zopen_lib(LIB_GGML_ZDNN ggml-zdnn "${GGML_ROOT}")
+find_zopen_lib(LIB_ZDNN zdnn "${ZDNN_ROOT}")
+find_zopen_lib(LIB_MTMD mtmd "${LLAMA_ROOT}")
+find_zopen_lib(LIB_BLIS blis "${BLIS_ROOT}")
+find_zopen_lib(LIB_ZOSLIB zoslib "${ZOSLIB_ROOT}")
 
 # llama and ggml are hard requirements: embedder.h calls ggml directly
 # (ggml_backend_dev_by_type), so every tool needs both on its link line.
