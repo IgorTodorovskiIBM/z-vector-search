@@ -14,10 +14,12 @@ if(DEFINED ENV{ZOPEN_PKGINSTALL})
     set(DEFAULT_LLAMA "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
     set(DEFAULT_ZOSLIB "$ENV{ZOPEN_PKGINSTALL}/zoslib/zoslib")
     set(DEFAULT_BLIS "$ENV{ZOPEN_PKGINSTALL}/blis/blis-2.0")
+    set(DEFAULT_ZDNN "$ENV{ZOPEN_PKGINSTALL}/zdnn/zdnn")
 else()
     set(DEFAULT_LLAMA "/usr/local/llamacpp")
     set(DEFAULT_ZOSLIB "/usr/local/zoslib")
     set(DEFAULT_BLIS "/usr/local/blis")
+    set(DEFAULT_ZDNN "/usr/local/zdnn")
 endif()
 
 set(LLAMA_ROOT "${DEFAULT_LLAMA}" CACHE PATH "Path to llamacpp installation")
@@ -50,6 +52,7 @@ if(GGML_ROOT STREQUAL "${LLAMA_ROOT}"
 endif()
 set(ZOSLIB_ROOT "${DEFAULT_ZOSLIB}" CACHE PATH "Path to zoslib installation")
 set(BLIS_ROOT "${DEFAULT_BLIS}" CACHE PATH "Path to blis installation")
+set(ZDNN_ROOT "${DEFAULT_ZDNN}" CACHE PATH "Path to zdnn installation")
 
 message(STATUS "Using LLAMA_ROOT: ${LLAMA_ROOT}")
 message(STATUS "Using GGML_ROOT: ${GGML_ROOT}")
@@ -127,14 +130,33 @@ function(find_zopen_lib VAR NAME ROOT)
     endif()
 endfunction()
 
-find_zopen_lib(LIB_LLAMA llama ${LLAMA_ROOT})
-find_zopen_lib(LIB_GGML ggml ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_BASE ggml-base ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_CPU ggml-cpu ${GGML_ROOT})
-find_zopen_lib(LIB_GGML_BLAS ggml-blas ${GGML_ROOT})
-find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
-find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
-find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
+# An empty root means the environment did not supply one -- typically
+# ${LLAMACPP_HOME} expanding to nothing because the installed llamacpp package
+# exports a differently-named variable. Say so, rather than letting every
+# find_zopen_lib call below fail on its argument count.
+foreach(R LLAMA_ROOT GGML_ROOT)
+    if(NOT ${R})
+        message(FATAL_ERROR
+            "${R} is empty. Pass -D${R}=<prefix>; under zopen it comes from "
+            "LLAMACPP_HOME, so check that the installed llamacpp package "
+            "exports it.")
+    endif()
+endforeach()
+
+find_zopen_lib(LIB_LLAMA llama "${LLAMA_ROOT}")
+find_zopen_lib(LIB_GGML ggml "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_BASE ggml-base "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_CPU ggml-cpu "${GGML_ROOT}")
+find_zopen_lib(LIB_GGML_BLAS ggml-blas "${GGML_ROOT}")
+# libggml.a carries an undefined ggml_backend_zdnn_reg when llama.cpp is built
+# with GGML_ZDNN=ON, and libggml-zdnn.a in turn needs the zdnn library itself.
+# Without both on the link line the symbol is left for run-time DLL resolution,
+# which sends the binary looking for libzdnn.so.
+find_zopen_lib(LIB_GGML_ZDNN ggml-zdnn "${GGML_ROOT}")
+find_zopen_lib(LIB_ZDNN zdnn "${ZDNN_ROOT}")
+find_zopen_lib(LIB_MTMD mtmd "${LLAMA_ROOT}")
+find_zopen_lib(LIB_BLIS blis "${BLIS_ROOT}")
+find_zopen_lib(LIB_ZOSLIB zoslib "${ZOSLIB_ROOT}")
 
 # llama and ggml are hard requirements: embedder.h calls ggml directly
 # (ggml_backend_dev_by_type), so every tool needs both on its link line.
@@ -148,10 +170,28 @@ foreach(L LIB_LLAMA LIB_GGML)
     endif()
 endforeach()
 
+# On z/OS the zopen llamacpp is always built with GGML_ZDNN=ON, so libggml.a
+# carries an undefined ggml_backend_zdnn_reg. Both libraries are mandatory
+# there: leave either off the link line and the symbol falls through to
+# run-time DLL resolution, sending the binary looking for libzdnn.so. Fail at
+# configure time rather than shipping something that breaks when it runs.
+if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
+    foreach(L LIB_GGML_ZDNN LIB_ZDNN)
+        if(NOT ${L})
+            message(FATAL_ERROR
+                "${L} not found. llamacpp on z/OS is built with zDNN, so "
+                "libggml-zdnn.a and libzdnn.a must both be linked. Install the "
+                "zdnn package, or pass -DZDNN_ROOT=<prefix> if it lives "
+                "elsewhere.")
+        endif()
+    endforeach()
+endif()
+
 # Check the rest and warn if missing (some older versions might not have all
 # ggml-* split libs; blis/zoslib are z/OS-only).
 set(LLAMA_LIBS "")
-foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS LIB_MTMD LIB_BLIS LIB_ZOSLIB)
+foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS
+          LIB_GGML_ZDNN LIB_ZDNN LIB_MTMD LIB_BLIS LIB_ZOSLIB)
     if(${L})
         list(APPEND LLAMA_LIBS ${${L}})
     else()

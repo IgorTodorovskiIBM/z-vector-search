@@ -16,10 +16,12 @@ if(DEFINED ENV{ZOPEN_PKGINSTALL})
     set(_vs_default_llama "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
     set(_vs_default_zoslib "$ENV{ZOPEN_PKGINSTALL}/zoslib/zoslib")
     set(_vs_default_blis "$ENV{ZOPEN_PKGINSTALL}/blis/blis-2.0")
+    set(_vs_default_zdnn "$ENV{ZOPEN_PKGINSTALL}/zdnn/zdnn")
 else()
     set(_vs_default_llama "/usr/local/llamacpp")
     set(_vs_default_zoslib "/usr/local/zoslib")
     set(_vs_default_blis "/usr/local/blis")
+    set(_vs_default_zdnn "/usr/local/zdnn")
 endif()
 
 if(NOT DEFINED LLAMA_ROOT)
@@ -30,6 +32,9 @@ if(NOT DEFINED ZOSLIB_ROOT)
 endif()
 if(NOT DEFINED BLIS_ROOT)
     set(BLIS_ROOT "${_vs_default_blis}" CACHE PATH "Path to blis installation")
+endif()
+if(NOT DEFINED ZDNN_ROOT)
+    set(ZDNN_ROOT "${_vs_default_zdnn}" CACHE PATH "Path to zdnn installation")
 endif()
 
 function(_vs_find_lib VAR NAME ROOT)
@@ -49,13 +54,18 @@ _vs_find_lib(_VS_LIB_GGML      ggml      "${LLAMA_ROOT}")
 _vs_find_lib(_VS_LIB_GGML_BASE ggml-base "${LLAMA_ROOT}")
 _vs_find_lib(_VS_LIB_GGML_CPU  ggml-cpu  "${LLAMA_ROOT}")
 _vs_find_lib(_VS_LIB_GGML_BLAS ggml-blas "${LLAMA_ROOT}")
+# libggml.a carries an undefined ggml_backend_zdnn_reg when llama.cpp is built
+# with GGML_ZDNN=ON, and libggml-zdnn.a in turn needs the zdnn library itself.
+_vs_find_lib(_VS_LIB_GGML_ZDNN ggml-zdnn "${LLAMA_ROOT}")
+_vs_find_lib(_VS_LIB_ZDNN      zdnn      "${ZDNN_ROOT}")
 _vs_find_lib(_VS_LIB_MTMD      mtmd      "${LLAMA_ROOT}")
 _vs_find_lib(_VS_LIB_BLIS      blis      "${BLIS_ROOT}")
 _vs_find_lib(_VS_LIB_ZOSLIB    zoslib    "${ZOSLIB_ROOT}")
 
 set(_VS_LLAMA_LIBS "")
 foreach(L _VS_LIB_LLAMA _VS_LIB_GGML _VS_LIB_GGML_BASE _VS_LIB_GGML_CPU
-          _VS_LIB_GGML_BLAS _VS_LIB_MTMD _VS_LIB_BLIS _VS_LIB_ZOSLIB)
+          _VS_LIB_GGML_BLAS _VS_LIB_GGML_ZDNN _VS_LIB_ZDNN _VS_LIB_MTMD
+          _VS_LIB_BLIS _VS_LIB_ZOSLIB)
     if(${L})
         list(APPEND _VS_LLAMA_LIBS "${${L}}")
     endif()
@@ -68,9 +78,26 @@ elseif(EXISTS "${LLAMA_ROOT}/llama.h")
     target_include_directories(vectorsearch::vectorsearch INTERFACE "${LLAMA_ROOT}")
 endif()
 
-# Attach whatever we found to the interface target. Missing libs aren't fatal
-# here — a consumer that never calls embedding functions won't reference the
-# llama symbols, so the linker will be happy either way.
+# On z/OS the zopen llamacpp is always built with GGML_ZDNN=ON, so anything that
+# links libggml.a needs libggml-zdnn.a and libzdnn.a as well. Leave either off
+# and the z/OS linker does not complain — it defers ggml_backend_zdnn_reg to
+# run-time DLL resolution, and the consumer's binary then goes looking for
+# libzdnn.so. Fail at find_package() time instead of at run time.
+if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
+    foreach(L _VS_LIB_GGML_ZDNN _VS_LIB_ZDNN)
+        if(NOT ${L})
+            message(FATAL_ERROR
+                "vectorsearch: ${L} not found. llamacpp on z/OS is built with "
+                "zDNN, so libggml-zdnn.a and libzdnn.a must both be linked. "
+                "Install the zdnn package, or pass -DZDNN_ROOT=<prefix> if it "
+                "lives elsewhere.")
+        endif()
+    endforeach()
+endif()
+
+# Attach whatever we found to the interface target. Off z/OS the remaining libs
+# aren't fatal — a consumer that never calls embedding functions won't reference
+# the llama symbols, so the linker will be happy either way.
 if(_VS_LLAMA_LIBS)
     target_link_libraries(vectorsearch::vectorsearch INTERFACE ${_VS_LLAMA_LIBS})
 endif()
