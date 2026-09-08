@@ -14,10 +14,12 @@ if(DEFINED ENV{ZOPEN_PKGINSTALL})
     set(DEFAULT_LLAMA "$ENV{ZOPEN_PKGINSTALL}/llamacpp/llamacpp")
     set(DEFAULT_ZOSLIB "$ENV{ZOPEN_PKGINSTALL}/zoslib/zoslib")
     set(DEFAULT_BLIS "$ENV{ZOPEN_PKGINSTALL}/blis/blis-2.0")
+    set(DEFAULT_ZDNN "$ENV{ZOPEN_PKGINSTALL}/zdnn/zdnn")
 else()
     set(DEFAULT_LLAMA "/usr/local/llamacpp")
     set(DEFAULT_ZOSLIB "/usr/local/zoslib")
     set(DEFAULT_BLIS "/usr/local/blis")
+    set(DEFAULT_ZDNN "/usr/local/zdnn")
 endif()
 
 set(LLAMA_ROOT "${DEFAULT_LLAMA}" CACHE PATH "Path to llamacpp installation")
@@ -50,6 +52,7 @@ if(GGML_ROOT STREQUAL "${LLAMA_ROOT}"
 endif()
 set(ZOSLIB_ROOT "${DEFAULT_ZOSLIB}" CACHE PATH "Path to zoslib installation")
 set(BLIS_ROOT "${DEFAULT_BLIS}" CACHE PATH "Path to blis installation")
+set(ZDNN_ROOT "${DEFAULT_ZDNN}" CACHE PATH "Path to zdnn installation")
 
 message(STATUS "Using LLAMA_ROOT: ${LLAMA_ROOT}")
 message(STATUS "Using GGML_ROOT: ${GGML_ROOT}")
@@ -132,6 +135,12 @@ find_zopen_lib(LIB_GGML ggml ${GGML_ROOT})
 find_zopen_lib(LIB_GGML_BASE ggml-base ${GGML_ROOT})
 find_zopen_lib(LIB_GGML_CPU ggml-cpu ${GGML_ROOT})
 find_zopen_lib(LIB_GGML_BLAS ggml-blas ${GGML_ROOT})
+# libggml.a carries an undefined ggml_backend_zdnn_reg when llama.cpp is built
+# with GGML_ZDNN=ON, and libggml-zdnn.a in turn needs the zdnn library itself.
+# Without both on the link line the symbol is left for run-time DLL resolution,
+# which sends the binary looking for libzdnn.so.
+find_zopen_lib(LIB_GGML_ZDNN ggml-zdnn ${GGML_ROOT})
+find_zopen_lib(LIB_ZDNN zdnn ${ZDNN_ROOT})
 find_zopen_lib(LIB_MTMD mtmd ${LLAMA_ROOT})
 find_zopen_lib(LIB_BLIS blis ${BLIS_ROOT})
 find_zopen_lib(LIB_ZOSLIB zoslib ${ZOSLIB_ROOT})
@@ -151,7 +160,8 @@ endforeach()
 # Check the rest and warn if missing (some older versions might not have all
 # ggml-* split libs; blis/zoslib are z/OS-only).
 set(LLAMA_LIBS "")
-foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS LIB_MTMD LIB_BLIS LIB_ZOSLIB)
+foreach(L LIB_LLAMA LIB_GGML LIB_GGML_BASE LIB_GGML_CPU LIB_GGML_BLAS
+          LIB_GGML_ZDNN LIB_ZDNN LIB_MTMD LIB_BLIS LIB_ZOSLIB)
     if(${L})
         list(APPEND LLAMA_LIBS ${${L}})
     else()
