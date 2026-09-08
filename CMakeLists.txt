@@ -157,6 +157,23 @@ foreach(L LIB_LLAMA LIB_GGML)
     endif()
 endforeach()
 
+# On z/OS the zopen llamacpp is always built with GGML_ZDNN=ON, so libggml.a
+# carries an undefined ggml_backend_zdnn_reg. Both libraries are mandatory
+# there: leave either off the link line and the symbol falls through to
+# run-time DLL resolution, sending the binary looking for libzdnn.so. Fail at
+# configure time rather than shipping something that breaks when it runs.
+if(CMAKE_SYSTEM_NAME MATCHES "OS390|zOS")
+    foreach(L LIB_GGML_ZDNN LIB_ZDNN)
+        if(NOT ${L})
+            message(FATAL_ERROR
+                "${L} not found. llamacpp on z/OS is built with zDNN, so "
+                "libggml-zdnn.a and libzdnn.a must both be linked. Install the "
+                "zdnn package, or pass -DZDNN_ROOT=<prefix> if it lives "
+                "elsewhere.")
+        endif()
+    endforeach()
+endif()
+
 # Check the rest and warn if missing (some older versions might not have all
 # ggml-* split libs; blis/zoslib are z/OS-only).
 set(LLAMA_LIBS "")
